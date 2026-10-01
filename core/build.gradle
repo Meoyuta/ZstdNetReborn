@@ -1,0 +1,13 @@
+plugins {
+    id "java-library"
+}
+
+dependencies {
+    api "com.github.luben:zstd-jni:${zstd_jni_version}"
+    compileOnly "io.netty:netty-all:4.1.118.Final"
+
+    testImplementation platform("org.junit:junit-bom:${junit_version}")
+    testImplementation "org.junit.jupiter:junit-jupiter"
+    testImplementation "io.netty:netty-all:4.1.118.Final"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+}

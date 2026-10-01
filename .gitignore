@@ -1,0 +1,11 @@
+.gradle/
+**/build/
+target/
+build.log
+.idea/
+*.iml
+/improve.md
+/memory.md
+/plan.md
+/plan_temple.md
+/relemods/
