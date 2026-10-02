@@ -29,11 +29,6 @@ public final class ZstdNetConnectionHooks {
         }
 
         var config = ZstdNetClient.config();
-        if (!config.enabled()) {
-            PENDING.remove(key(host, port));
-            ZstdNetClient.logger().debug("prepare skipped: disabled for " + host + ":" + port);
-            return false;
-        }
         var capability = CapabilityProbe.cached(host, port);
         if (!Boolean.TRUE.equals(capability)) {
             PENDING.remove(key(host, port));

@@ -6,11 +6,9 @@ import java.nio.file.Path;
 import java.util.Properties;
 
 public final class ClientConfig {
-    private final boolean enabled;
     private final int compressionLevel;
 
-    private ClientConfig(boolean enabled, int compressionLevel) {
-        this.enabled = enabled;
+    private ClientConfig(int compressionLevel) {
         this.compressionLevel = Math.clamp(compressionLevel, 1, 22);
     }
 
@@ -23,9 +21,6 @@ public final class ClientConfig {
             } catch (IOException ignored) {
             }
         } else {
-            // Compression remains opt-in globally; every enabled server is
-            // checked by the capability probe before the pipeline is installed.
-            props.setProperty("enabled", "false");
             props.setProperty("compression-level", "6");
             try {
                 Files.createDirectories(configDir);
@@ -37,14 +32,8 @@ public final class ClientConfig {
         }
 
         var level = parseInt(props.getProperty("compression-level"));
-        return new ClientConfig(Boolean.parseBoolean(props.getProperty("enabled", "false")), level);
+        return new ClientConfig(level);
     }
-
-    public boolean enabledFor(String host, int port) {
-        return enabled && host != null && !host.isBlank();
-    }
-
-    public boolean enabled() { return enabled; }
 
     public int compressionLevel() {
         return compressionLevel;

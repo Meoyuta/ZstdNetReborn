@@ -1,53 +1,366 @@
-# ZstdNet NeoForge 1.21.1 技术文档
+# ZstdNet Technical Documentation
 
-## 工程范围
+This document describes the current project's operation and protocol principles.
 
-本仓库是 Minecraft 1.21.1 / NeoForge 21.1.223 的双端独立工程，使用 Java 21。项目采用 NeoForge MDK/ModDev Gradle 的单一根工程，源码只使用标准 `src/main` 与 `src/test` 源集。目标版本参数集中在根目录 `gradle.properties`。
+## 1. Project Structure
 
-`mys.zstdnet.reborn.core` 提供帧协议、Netty 编解码器、流量统计、压缩 benchmark、字典存储/训练/同步；`mys.zstdnet.reborn.client` 提供客户端配置、连接选择和字典缓存；`mys.zstdnet.reborn.neoforge` 按入口、`client`、`network`、`command`、`mixin` 分包，提供 NeoForge 双端入口、同端口注入、命令、payload、screen 与 overlay。所有代码属于同一根工程，不再通过 Gradle 子项目互相依赖。
+ZstdNet can be divided into four layers:
 
-## 连接与协议
+- core: Persistent Zstandard streams, frame format, Netty codecs, dictionary protocol, traffic statistics, and benchmarks. This layer is kept as independent from Minecraft as possible.
+- client: Client compression-level configuration, capability-probe cache, connection-preparation queue, and client dictionary cache.
+- neoforge: Mod lifecycle, same-port server injection, client Mixins, commands, management payloads, and overlay.
+- test: Regression tests for the protocol, dictionaries, Netty pipelines, connection selection, and benchmarks.
 
-客户端从 `config/zstdnet-client.properties` 读取全局连接配置，当前只有 `enabled` 和 `compression-level` 两项；新生成配置默认 `enabled=false`、客户端等级为 6。启用后每个服务器都必须先执行独立 TCP 能力探测，不再支持服务器白名单或跳过探测：客户端发送 4 字节 `ZNP` 能力探测头（版本字节 `0x01`），服务端返回 5 字节响应（`ZNP`、响应字节 `0x02`、协议版本 `2`）后关闭探测连接，客户端缓存结果后才为后续真正的 Minecraft TCP 连接安装压缩管线。探测在后台线程执行，成功结果缓存 5 分钟，失败结果缓存 30 秒；连接建立和读取响应的单次超时约 1 秒。探测失败、超时或服务端不支持时记录 debug/warning 并继续使用普通明文连接。LAN/集成服务器仍不支持。共享 Netty codec 安装在入站 AES 解密后、packet splitter 前，以及出站 AES 加密前、packet framing 后。服务端先识别能力探测魔数，再识别 Zstandard frame magic 与协议版本；匹配后安装 ZstdNet pipeline 并避免原版压缩协商。原版 status ping 透传；未安装/不匹配的连接按配置返回拒绝信息。
+The intended runtime environment is Minecraft 1.21.1, NeoForge 21.1.223, and Java 25. The project is built with Java 21.
 
-协议 v2 使用双向持久 zstd 流，每个数据帧仍显式保留原始长度和压缩块长度。`storedTag == 0` 的小帧按原始字节直通；压缩帧由持久流解压。压缩等级或字典变化时重置相应流上下文，连接关闭时释放上下文。协议版本不同步时不提供旧协议兼容；解码器遇到压缩流无进展会立即以连接错误结束，不能在 event loop 上无限等待。
+## 2. Overall Connection Flow
 
-能力探测只用于连接选择，不会把探测字节注入 Minecraft 登录流。服务端的同端口 handler 在未决状态下仅接受完整探测魔数、返回固定响应并关闭连接；收到 Zstandard magic 才进入限流、握手和压缩管线安装流程。这样未安装 ZstdNet 的普通服务器不会收到压缩握手，客户端也不会因误装管线而破坏明文协议。
+A connection is processed in the following order:
 
-编码器在 event loop 上维护每连接 FIFO 待发送队列，write 只入队，flush 在 64 KiB 上限或 2 ms 截止窗到达时合并压缩；控制帧和数据帧共用同一队列。批量 promise 由聚合 promise 收口，失败时逐个通知并关闭连接；通道不可写时立即刷出，绝不丢帧，也不使用全局 worker 队列。持久 zstd 流建立在连续 TCP 字节流之上，所有入队字节必须按序进入同一压缩流。Netty ByteBuf 直接作为输入，压缩输出使用引用计数 ByteBuf，样本采集最多复制 4 KiB。代价是压缩期间 event loop 会被占用，可能造成服务端 tick/网络处理卡顿，应通过实服加入突发验证其性能。
+1. The client intercepts Minecraft's connection entry point and obtains the target host and port.
+2. The client performs the ZstdNet capability probe on a background thread; the probe does not block the game thread.
+3. After a successful probe, the client stores one pending-installation record for that host and port.
+4. After Minecraft creates the actual TCP Connection, ZstdNet reads the pending-installation record when the pipeline is configured.
+5. The client installs the ZstdNet codecs and repositions them after the encryption pipeline is established.
+6. The server receives child connections on Minecraft's ServerChannel and first determines whether each connection is a capability probe, a ZstdNet handshake, or ordinary Minecraft traffic.
+7. After both sides confirm the protocol version, data is transferred over a persistent Zstandard stream on the same TCP byte stream.
+8. When the connection closes, the compression streams, decompression executor, dictionary session, and connection-level statistics are released.
 
-## Sable 独立 UDP 兼容
+The client configuration only stores `compression-level`. Whether the compression pipeline is installed is determined entirely by the capability probe. If probing fails, times out, or returns a mismatched protocol version, the current connection immediately falls back to the ordinary protocol without ZstdNet.
 
-Sable (`modId = sable`) 在 NeoForge 元数据中声明为 optional 软依赖，版本范围从 2.0.5 起；未安装 Sable 不影响 ZstdNet 加载。ZstdNet 不静态链接 Sable API。服务端同端口注入器采用两层排除：已知规则跳过带有 Sable UDP decoder 的本地 UDP channel；通用规则只接受 Netty `ServerChannel`，并拒绝 `DatagramChannel`，因此独立 UDP 监听器不会进入 TCP 接受注入。Minecraft 的本地 TCP channel 仍保留原有处理。
+## 3. Client Configuration and Connection Preparation
 
-Sable 的激活令牌通过 Minecraft TCP 自定义 payload 传送，UDP 认证、数据报和 keep-alive 使用 Sable 自己的 datagram pipeline。ZstdNet 只压缩 Minecraft TCP 流量，不压缩 Sable UDP 数据报；Sable 的 UDP 超时回退行为不由 ZstdNet 改写。源码核对基于 Sable 上游提交 `6f2b321`（版本 2.0.5，Minecraft 1.21.1，NeoForge 21.1.228）。本项目目标为 NeoForge 21.1.223，因此该源码核对不等于已验证完整运行组合。
+### 3.1 Client Configuration
 
-### 其他独立 UDP 模组
+`ClientConfig` reads the `compression-level` field from `config/zstdnet-client.properties`.
 
-兼容分为两套规则：已知模组可增加专用的 pipeline/handler 排除（当前已覆盖 Sable）；未知模组走通用 `ServerChannel`/`DatagramChannel` 类型过滤。Simple Voice Chat (`modId = voicechat`) 当前实现使用独立 Java `DatagramSocket`（默认 UDP 24454），不注册到 Minecraft `ServerConnectionListener.channels`，所以天然不进入 ZstdNet 注入范围，不需要增加专用依赖或 API 链接。该判断适用于独立 socket；如果其他模组把 UDP 伪装为本地 `ServerChannel`，仍需增加其 handler 特征到已知排除表。
+The `compression-level` field controls the client's outbound compression level. Its default is `compression-level=6`.
 
-已完成 IDEA MCP 项目读取/搜索、增量构建、`ZstdNettyPipelineTest`、根工程 `./gradlew test`、`bash ./build.sh` 和发行 JAR 生成；发行 JAR 中确认 Sable dependency type 为 `optional`。当前 `settings.gradle` 是单一根工程，没有 `main` Gradle 子项目，因此 `./gradlew :main:test` 不适用，正确测试任务为 `./gradlew test`。尚未完成同时安装 ZstdNet/Sable 的真实双端联机测试，特别是 UDP 激活、持续收发、keep-alive 超时回退及服务端关闭清理；该组合仍需在匹配的 NeoForge 环境实测。
+The configuration directory and file are created automatically on first startup. The compression level is restricted to 1 through 22; a missing or invalid value falls back to 6.
 
-## Benchmark 与等级
+### 3.2 Connection Entry Point
 
-服务端默认压缩等级为 9，`/zstdnet complevel set <1-22>` 可更改新连接使用的服务端等级；客户端新生成配置默认等级为 6，双方等级分别作用于各自的出站流。已建立连接保持协商时等级。定时 benchmark 和自动应用等级默认关闭。管理员可用 `/zstdnet benchmark start` 手动评估；候选范围通过 `/zstdnet benchmark setbaseline <min> <max>` 配置，闭区间必须满足 1 <= min <= max <= 22，默认范围为 5-13。等级选择同时考虑压缩后大小与编解码耗时，避免只追求压缩率而选出过慢等级。范围保存到 `config/zstdnet/server.properties` 的 `benchmark-baseline-min/max`；首次生成服务端配置时默认写入等级 9。Benchmark 从真实网络包采集有界样本，在独立 executor 上使用独立 codec 和样本快照，不复用在线连接上下文。调度周期仍由 `/zstdnet benchmark interval <分钟>` 管理；定时执行可在服务器属性中显式启用。
+`ConnectScreenMixin` calls `ZstdNetConnectHooks` at the `ConnectScreen.startConnecting` entry point. The connection address itself is not replaced; ZstdNet only calls `ZstdNetConnectionHooks.prepare(host, port)` to record the connection-preparation state.
 
-## 字典
+When there is no valid probe result in the cache, the following actions are performed:
 
-字典以单个 ZIP bundle 保存，包含 `uplink.zdict`（最多 64 KiB）和 `downlink.zdict`（最多 128 KiB）。训练分别收集两个方向的样本并独立训练。bundle、选择状态和待命名字典存放在 `config/zstdnet/dict/`；客户端校验服务端字典 ID 后缓存并确认，之后才启用对应方向的字典压缩。字典失败原因使用 `INBOUND_ID_MISMATCH`、`OFFER_REJECTED`、`INVALID`、`IO` 枚举传递，不依赖错误文案匹配。服务端发现客户端 uplink ID 不匹配或拒绝 offer 时，双方该方向继续使用无字典流，并分别累计记录降级次数和当前降级连接数，避免连接因字典差异断开；当前协议仍没有服务端主动下发新 uplink 的路径。旧的单字典格式不兼容。
+- Remove any existing pending-installation record for the address.
+- Start one background probe.
+- Continue the current Minecraft connection using the ordinary protocol.
 
-## 状态与诊断
+When the cached result indicates support, the connection-preparation queue stores the host, port, client compression level, and a 15-second expiration time. At most eight pending-installation records are retained for one address; expired records are cleaned up by a new preparation request.
 
-F8 打开 overlay 选择界面，可选 benchmark、管理状态和字典状态；只有通过 F8 菜单关闭 overlay，离开世界时会清除状态且不持久化。界面数据约每秒更新一次，不阻塞玩家移动和交互。管理状态包括压缩等级、当前 RTT、服务器视角的每秒上/下行（原始与线路字节）、运行时长、进程内 benchmark 次数，以及字典上行降级累计数和当前降级连接数；overlay 使用“累计 / 当前”格式展示，这些数值同时写入 `/zstdnet debug` 报告中的 `dictionary_uplink_fallbacks` 与 `dictionary_active_fallback_connections` 字段。
+### 3.3 Installation on the Actual TCP Pipeline
 
-`/zstdnet ping` 使用 nonce 请求/响应及 `System.nanoTime()` 测量 RTT，不复用 Minecraft 延迟值；该命令需要玩家来源以便返回结果。`/zstdnet debug` 无额外权限要求，玩家、控制台、命令方块和其他 `CommandSourceStack` 均可执行，在 `config/debug/` 写入一次性 UTF-8 诊断报告，报告中的 requester 使用命令源文本名称，包含连接、流量/压缩、benchmark、字典、服务端 tick、JVM 与玩家 RTT 拆分信息，不进行逐包持续磁盘记录。
+`ConnectionMixin` invokes the installation logic after Minecraft finishes `configurePacketHandler`. The installation logic accepts only TCP `InetSocketAddress` connections. ZstdNet is not installed on:
 
-报告还包括 `compress_frames`、`compress_batches`、同步/异步微秒数、降级次数、丢弃次数、最大帧耗时和大小直方图；`compress_dropped` 非零即表示严重协议缺陷。日志诊断中若 `server_tick_max_ms` 达到数秒，应优先按服务端主线程停顿处理，而不是把 Tab 延迟直接归因于 ZstdNet 网络压缩；Netty 压缩线程栈与服务端 tick 栈需分别判断。
+- Sable-specific UDP pipelines.
+- Other `DatagramChannel` instances.
+- Pipelines without an available remote TCP address.
+- Pipelines without a corresponding pending-installation record.
 
-连接诊断还会在 ZstdNet TCP pipeline 中安装 `zstdnet-diagnostics`。该 handler 不修改消息，仅记录 channel short id、remote、active/open 状态、最后一个入站/出站消息类型、pipeline、`close-request`、`disconnect-request`、`deregister-request`、`close-complete`、`channelInactive` 和 `exceptionCaught`；异常会保留完整 cause 到 FINE 日志。独立 `DatagramChannel` 在安装前被排除，因此不会安装该 handler、ZstdNet 编解码器或控制 handler。
+After a successful installation, the client creates `ZstdNettyEncoder` and `ZstdNettyDecoder` instances with a dictionary session. The `setEncryptionKey` Mixin callback then calls `reposition` again to ensure that the codecs remain on the correct side of the encryption boundary.
 
-历史异步编码器曾在队列溢出时关闭连接，随后改成丢包成功虽避免 promise 异常，却会破坏连续 zstd 流并令客户端 packet decoder 失步。当前改回 event loop 同步压缩，彻底移除队列上限和丢包路径，以阻塞发送生产者来保持字节流完整；需要监测其对 event loop 延迟和服务端 tick 的影响。停服字典训练最多等待 30 秒，超时后丢弃未发布结果并记录 warning。
+The inbound order is:
 
-## 构建与验证
+    Minecraft decryption -> ZstdNet decoder -> packet splitter -> Minecraft packet decoder
 
-唯一项目构建入口为 `bash ./build.sh`。脚本清理 `target/` 中旧 JAR，运行根项目的 `clean build`，并将 `build/libs` 的运行时 JAR 复制到 `target/`。根目录 `build.log` 记录该脚本输出，构建状态以日志末尾和脚本退出码为准。`./gradlew test` 可运行全部回归测试。发行前应检查 JAR 包含 NeoForge 双端入口、`core`/`client`/`neoforge` 包和内嵌 zstd-jni JarJar 依赖；真实服务端/客户端连接、压缩表现和 screen 行为仍需游戏内验证。
+The outbound order is:
+
+    Minecraft packet encoder -> packet prepender -> ZstdNet encoder -> Minecraft encryption
+
+The actual pipeline repositions handlers according to whether `decrypt`/`encrypt` and `splitter`/`prepender` are present. If an anchor is missing, the current position is retained and a warning is logged.
+
+## 4. Protocol Probe
+
+### 4.1 Probe Bytes
+
+The client sends the following through a temporary TCP socket:
+
+    Z N P 0x01
+
+The server returns:
+
+    Z N P 0x02 0x02
+
+The final byte identifies protocol version 2. The client validates the complete response byte by byte; any mismatch is treated as unsupported. The probe socket is closed after the complete response is received, so the probe bytes are never injected into the Minecraft login stream.
+
+### 4.2 Asynchronous Execution and Caching
+
+`CapabilityProbe` performs probes using a daemon executor. The probe parameters are:
+
+- TCP connection timeout: 1 second.
+- Socket read timeout: 1 second.
+- Additional future timeout: approximately 1.25 seconds.
+- Successful-result cache: 5 minutes.
+- Failed-result cache: 30 seconds.
+- Concurrent probes for the same host and port are merged through `IN_FLIGHT`.
+
+The cache key uses the lowercase host name and port. The cache only determines whether subsequent connections may install compression; it does not change an already established ordinary connection.
+
+## 5. Server Startup and Same-Port Injection
+
+### 5.1 ZstdNet Service Lifecycle
+
+ZstdNet starts from `ServerStartedEvent`. Startup performs the following operations:
+
+1. Create the server configuration and dictionary storage.
+2. Load the currently selected dictionary.
+3. Create the dictionary trainer and benchmark.
+4. Create `SamePortZstdInjector`.
+5. Read Minecraft's `ServerConnectionListener.channels` through a Mixin accessor.
+6. Iterate over the channels, exclude `DatagramChannel` instances, and add accept handlers only to TCP `ServerChannel` instances.
+7. Record the injection status and begin accepting connections.
+
+If injection fails, no `ServerChannel` can be found, or the accessor cannot read the field, the server remains on the vanilla network.
+
+### 5.2 Mixin Accessor
+
+`ServerConnectionListenerAccessor` accesses the `channels` field with `@Accessor("channels")`. Field binding is handled by Mixin application and the refmap. The injector copies the channel-future list after reading it and then filters for usable TCP channels.
+
+### 5.3 Child-Connection Handling
+
+When an `AcceptInjector` on the server's `ServerChannel` sees a new child `Channel`, it inserts `SamePortZstdHandler` at the beginning of that child's pipeline. The handler processes the connection until protocol detection is complete, then removes itself and delegates to either the formal ZstdNet pipeline or the ordinary Minecraft pipeline.
+
+ZstdNet connections from one IP have two limits:
+
+- At most 3 active connections.
+- At most 10 handshake attempts per minute.
+
+The handshake window is cleaned up after every 1024 attempts. The capability-probe branch runs before admission and therefore does not consume handshake or active-connection slots.
+
+## 6. Server Protocol Detection
+
+`SamePortZstdHandler` has three internal modes:
+
+- UNDECIDED: waiting for enough bytes to identify the protocol.
+- RAW: pass through ordinary Minecraft traffic.
+- ZSTD: install and use the ZstdNet pipeline.
+
+Detection proceeds as follows:
+
+1. If a protocol-probe magic is received, return the fixed response and close the connection. This path is not rate-limited.
+2. If a Zstd frame magic is received, perform rate-limit admission, read the stream header, and install ZstdNet.
+3. For ordinary traffic, check whether it is a vanilla login packet:
+   - Login traffic receives the configured server rejection packet and the connection is closed.
+   - Other ordinary traffic enters RAW pass-through mode.
+4. A connection that has not completed detection is closed after 10 seconds to prevent half-open connections from permanently consuming resources.
+
+After entering ZSTD mode, the server creates directional dictionary sessions, installs the codecs, removes the vanilla compression-negotiation handlers, and immediately sends any pending dictionary control frames.
+
+## 7. Protocol Structure
+
+### 7.1 Magic and Stream Header
+
+A ZstdNet data stream begins with the 4-byte Zstandard magic:
+
+    28 B5 2F FD
+
+When a dictionary session is used, a one-byte stream header `0x02` follows. A protocol-version mismatch causes an immediate protocol error.
+
+### 7.2 Data Frames
+
+Each data frame contains two VarInts followed by the payload:
+
+    rawLength
+    storedTag
+    payload
+
+Their meanings are:
+
+- `rawLength`: the number of bytes after decompression.
+- `storedTag == 0`: the payload contains uncompressed raw bytes.
+- `storedTag != 0`: `storedTag >>> 1` is the compressed payload length.
+- `storedTag & 1 == 1`: the frame uses the currently active dictionary.
+- `storedTag & 1 == 0`: the frame does not use a dictionary.
+
+The maximum declared raw length accepted by the protocol is 2 MiB + 64 KiB. Lengths, payload lengths, and VarInts are validated before decoding; an invalid frame immediately terminates the connection.
+
+### 7.3 Control Frames
+
+A control frame uses `rawLength == 0`, with the payload encoded as a control record. Control records are used for:
+
+- Dictionary offers.
+- Dictionary acknowledgements.
+- Dictionary rejections.
+- Persistent-stream resets.
+
+Control frames and data frames share the same outbound FIFO, ensuring that a control record arrives before the data it governs. When a control record requires a response, the decoder sends the acknowledgement from the encoder context instead of passing through Minecraft's packet encoder and length prepender.
+
+## 8. Outbound Compression and Batching
+
+### 8.1 Persistent Zstandard Streams
+
+Each direction of each connection has its own `ZstdPersistentStreamCodec`. The encoder creates or replaces the persistent stream according to the current compression level and outbound dictionary ID:
+
+- When the level changes, send a stream reset and create a new stream.
+- When the dictionary ID changes, send a stream reset and create a new stream.
+- When the stream closes, release the native codec resources.
+
+Frames on one connection enter the same persistent stream in write order. Stream state is never shared between connections.
+
+### 8.2 FIFO Batching Queue
+
+After `ZstdNettyEncoder.write` receives a `ByteBuf`, it first places it in a connection-level FIFO. The batching rules are:
+
+- Maximum raw data per batch: 64 KiB.
+- Deadline window: 2 ms.
+- Maximum pending packets: 4096.
+- A single message that reaches 64 KiB is sent separately.
+- Control frames and ordinary data share the queue.
+
+When the size limit is reached, the channel becomes unwritable, or the deadline expires, the queue is merged into one contiguous raw `ByteBuf` and compressed through the persistent stream. Minecraft's upstream packet splitter/prepender continues to define packet boundaries; ZstdNet only merges contiguous bytes and does not redefine the Minecraft packet format.
+
+Each batch uses an aggregate promise. On success, the original promises are completed one by one; on failure, each promise is failed and the connection is closed. When the connection closes, all unsent `ByteBuf` instances and promises are released.
+
+## 9. Inbound Decompression
+
+The decoder parses headers, control frames, and ordinary frames on the event loop. Compressed frames with a raw length below 64 KiB are decompressed synchronously.
+
+When the raw length reaches 64 KiB:
+
+1. The decoder retains the payload from the input `ByteBuf`.
+2. It submits the decompression task to the connection's dedicated single-thread daemon executor.
+3. The event loop pauses further parsing for that connection to preserve persistent-stream order.
+4. The worker returns the result to the event loop when it completes.
+5. A successful result is passed to the next handler; a failure is propagated and the connection is closed.
+6. The event loop triggers the decoder again to process bytes accumulated while the worker was running.
+
+Only one decompression task runs per connection. The single-thread executor protects the persistent Zstd stream context and preserves frame-delivery order. When the connection closes or fails, the executor is stopped and the persistent stream is closed.
+
+## 10. Dictionary Synchronization
+
+### 10.1 Direction and Size
+
+The server and client maintain separate upload and download dictionaries:
+
+- Maximum server-to-client dictionary size: 128 KiB.
+- Maximum client-to-server dictionary size: 64 KiB.
+- Dictionaries are validated by ID and byte content.
+- If a dictionary does not match, that direction falls back to a stream without a dictionary.
+
+### 10.2 Control Flow
+
+A typical flow is:
+
+1. Send the stream header after establishing the ZstdNet stream.
+2. The offer contains the direction, dictionary ID, dictionary size, and dictionary bytes.
+3. The receiver validates the direction, length, and ID.
+4. Return an acknowledgement after successful validation.
+5. Activate the dictionary for that direction after the sender receives the acknowledgement.
+6. On validation failure or peer rejection, send a rejection and continue with a stream without a dictionary.
+
+Dictionary acknowledgements, rejections, and errors are recorded with the `DictionaryFailure` enum. An incomplete client dictionary download during disconnect is logged as an I/O failure.
+
+### 10.3 Suppressing Duplicate Offers
+
+The server records download-dictionary delivery state by remote host name and dictionary ID. If the same host has already received the same ID, later short connections skip the duplicate offer. When the dictionary ID changes, the record is updated and the offer is sent again. The host key does not include the temporary port that changes between connections.
+
+## 11. Vanilla Compression Negotiation and Third-Party Mods
+
+After ZstdNet is installed, `MinecraftCompressionDisabler` handles the vanilla login compression packet and removes the `compress` and `decompress` handlers from the pipeline. It performs this operation at several points, including inbound processing, outbound processing, an immediate task, and a 50 ms delayed task, to cover cases where vanilla handlers are added late.
+
+If a handler being removed does not belong to `net.minecraft.*`, a warning is logged to leave a trace of the installation conflict, because directly removing another mod's handler may cause unintended behavior.
+
+## 12. Compression Levels and Benchmarking
+
+The server's default outbound level is 9 and the client's default outbound level is 6. Each level applies independently to the persistent stream in that direction.
+
+Server commands can change the level used by new connections. The benchmark uses an independent codec and sampled snapshots to test candidate levels, recording compressed size and encode/decode time before selecting a level within the configured range. Online persistent streams are never reused by the benchmark; a new level applies to new connections or the next stream reset.
+
+## 13. Statistics, Status, and Diagnostics
+
+### 13.1 Traffic Statistics
+
+From the server's perspective, the following are recorded:
+
+- `rawUp / wireUp`: raw and on-the-wire bytes sent to the client.
+- `rawDown / wireDown`: raw and on-the-wire bytes received from the client.
+- Active and cumulative connection counts.
+- Upstream and downstream rates sampled every 500 ms.
+- The ratio of on-the-wire bytes to raw bytes.
+
+### 13.2 Compression Metrics
+
+`CompressionMetrics` uses concurrent counters to record:
+
+- Frame count.
+- Number of batches that were merged.
+- Synchronous/asynchronous duration in microseconds.
+- Fallback count.
+- Drop count.
+- Maximum frame duration.
+- Raw-data-size histogram.
+
+A non-zero `compress_dropped` should be treated as a protocol-defect signal indicating that frames may have been dropped.
+
+### 13.3 Status and Debugging
+
+Connection and service statuses include:
+
+- `active`
+- `not_installed`
+- `inject_failed`
+- `probe_failed`
+- `server_disabled`
+- `peer_unsupported`
+
+The management payload and overlay display connection status, upstream/downstream levels, traffic, compression ratio, dictionary connection count, dictionary fallback count, and RTT.
+
+`/zstdnet debug` generates a one-time UTF-8 report under `config/debug/`. The report includes compression metrics, traffic, benchmarks, dictionary information, server ticks, JVM and GC data, thread dumps, and player RTT information.
+
+## 14. Commands and Permissions
+
+The command root is `/zstdnet`.
+
+No permission is required for:
+
+- `ping`: a direct TCP RTT measurement available only to players.
+- `debug`: generate a diagnostic report and return its file path.
+
+Permission level 2 is required for:
+
+- `start`, `stop`, `reload`: manage the server-side Zstd service.
+- `complevel set <1-22>`: set the server compression level.
+- `benchmark start`, `benchmark interval <minutes>`: control benchmarking.
+- `dictionary train <seconds>`, `stop`, `cancel`: control dictionary training.
+- `dictionary import <path>`, `export`, `switch <dictionary-name>`, `unload`, `name <file> <dictionary-name>`: manage dictionaries.
+
+Management commands are valid only on dedicated servers. Dictionary training, switching, and unloading affect subsequent connections. When `dictionary switch` changes the dictionary, the server disconnects existing players to prevent persistent-stream contexts and dictionary state from being mixed.
+
+## 15. Connection Shutdown and Error Handling
+
+When a connection closes:
+
+- The encoder cancels its scheduled flush and releases pending `ByteBuf` instances.
+- The encoder and decoder close their persistent Zstandard streams.
+- The decoder stops the asynchronous decompression executor.
+- The dictionary session clears download and activation state.
+- The server removes the connection from active-IP counts and statistics.
+- An incomplete dictionary download records the failure reason.
+
+The current connection is closed, or vanilla networking is retained, in the following cases:
+
+- Invalid frame length, VarInt, control record, or protocol version.
+- Decompression failure or persistent-stream failure.
+- A dictionary-compressed frame arrives before the dictionary is activated.
+- Accessor or ServerChannel injection failure.
+- A half-open connection does not complete protocol detection before the handshake timeout.
+
+A failed probe does not close the real Minecraft connection; it makes that connection continue with the ordinary protocol.
+
+## 16. UDP and Third-Party Network Pipelines
+
+ZstdNet handles Minecraft TCP only. ZstdNet codecs are not installed on Sable's UDP pipeline, independent `DatagramChannel` instances, or non-Minecraft UDP sockets. Sable remains optional through an optional dependency and runtime pipeline recognition; ZstdNet does not statically link the Sable API.
+
+The server injector uses the Mixin accessor, `ServerChannel` type filtering, and `DatagramChannel` exclusion together to avoid treating an independent UDP listener as a Minecraft TCP acceptor.
+
+## 17. Build
+
+The project build entry point is:
+
+    bash ./build.sh
+
+The regular Gradle regression tests are run with:
+
+    ./gradlew test
