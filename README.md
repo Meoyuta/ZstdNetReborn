@@ -5,14 +5,14 @@ ZstdNet adds Zstandard compression to Minecraft 1.21.1 connections when the clie
 ## Requirements
 
 - Minecraft 1.21.1
-- NeoForge 21.1.223 (FML loader 4.0.42)
+- NeoForge 21.1.223
 - Java 21
 
 ## Build
 
 Run `bash ./build.sh` from this directory. The script builds the server-client mod, stores the distributable JAR under `target/`, and writes the build log to `build.log`.
 
-The artifact is named `ZstdNet-1.21.1-neoforge-server-client-1.1.7.2-beta.jar`. Install the same mod build on the server and every participating client. Keep the mod versions synchronized; older wire-protocol versions are intentionally unsupported.
+The artifact is copied to `target/ZstdNet-1.21.1-neoforge-server-client-<version>.jar` by the build script. Install the same mod build on the server and every participating client. Keep the mod versions synchronized; older wire-protocol versions are intentionally unsupported.
 
 ## Features
 

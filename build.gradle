@@ -1,35 +1,133 @@
 plugins {
-    id "java"
-    id "com.github.johnrengelman.shadow" version "8.1.1" apply false
-    id "dev.architectury.loom" version "${architectury_loom_version}" apply false
+    id 'java-library'
+    id 'maven-publish'
+    id 'net.neoforged.moddev' version '2.0.147'
 }
 
-allprojects {
-    group = mod_group
-    version = mod_version
+group = project.mod_group
+version = project.mod_version
+
+base {
+    archivesName = project.mod_id
 }
 
-subprojects {
-    apply plugin: "java"
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(project.java_version as int)
+    withSourcesJar()
+}
 
-    java {
-        sourceCompatibility = JavaVersion.toVersion(java_version)
-        targetCompatibility = JavaVersion.toVersion(java_version)
-        withSourcesJar()
+neoForge {
+    version = project.neoforge_version
+
+    runs {
+        configureEach {
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+            ideName = "NeoForge ${name.capitalize()}"
+        }
+        client {
+            client()
+            gameDirectory = project.file('runs/client')
+        }
+        server {
+            server()
+            gameDirectory = project.file('runs/server')
+            programArgument '--nogui'
+        }
     }
 
-    tasks.withType(JavaCompile).configureEach {
-        options.encoding = "UTF-8"
-        options.release = java_version as int
+    mods {
+        "${project.mod_id}" {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+repositories {
+    mavenCentral()
+    maven {
+        name = 'NeoForged'
+        url = 'https://maven.neoforged.net/releases'
+    }
+    maven {
+        name = "Modrinth"
+        url = "https://api.modrinth.com/maven"
+    }
+}
+
+sourceSets.main.resources {
+    srcDir 'src/generated/resources'
+}
+
+dependencies {
+    jarJar(implementation("com.github.luben:zstd-jni:${project.zstd_jni_version}")) {
+        version {
+            strictly project.zstd_jni_version
+        }
     }
 
-    tasks.withType(Test).configureEach {
-        useJUnitPlatform()
-        ["enabled", "levels", "corpus", "rounds", "warmups", "bandwidthMbps"].each { name ->
-            def propertyName = "zstdnet.benchmark.${name}"
-            if (System.getProperty(propertyName) != null) {
-                systemProperty(propertyName, System.getProperty(propertyName))
-            }
+    compileOnly "maven.modrinth:sable:2.0.5+mc1.21.1"
+
+    testImplementation platform("org.junit:junit-bom:${project.junit_version}")
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    testImplementation 'io.netty:netty-all:4.2.18.Final'
+}
+
+// Unit tests exercise the Java Netty pipeline only. Native transport artifacts are
+// platform-specific and are supplied by the NeoForge runtime when a game is run.
+configurations.configureEach {
+    exclude group: 'io.netty', module: 'netty-transport-native-epoll'
+    exclude group: 'io.netty', module: 'netty-transport-native-kqueue'
+    exclude group: 'io.netty', module: 'netty-resolver-dns-native-macos'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = project.java_version as int
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+    ['enabled', 'levels', 'corpus', 'rounds', 'warmups', 'bandwidthMbps'].each { name ->
+        def propertyName = "zstdnet.benchmark.${name}"
+        if (System.getProperty(propertyName) != null) {
+            systemProperty propertyName, System.getProperty(propertyName)
+        }
+    }
+}
+
+processResources {
+    inputs.property 'version', project.version
+    inputs.property 'minecraft_version', project.minecraft_version
+    inputs.property 'neoforge_version', project.neoforge_version
+    filesMatching('META-INF/neoforge.mods.toml') {
+        expand(
+            version: project.version,
+            minecraft_version: project.minecraft_version,
+            neoforge_version: project.neoforge_version,
+            mod_id: project.mod_id,
+            mod_name: project.mod_name
+        )
+    }
+    filesMatching('zstdnet.mixins.json') {
+        expand(java_version: project.java_version)
+    }
+}
+
+jar {
+    manifest {
+        attributes([
+            'Implementation-Title': project.mod_name,
+            'Implementation-Version': project.version,
+            'Automatic-Module-Name': "${project.mod_group}.${project.mod_id}"
+        ])
+    }
+}
+
+publishing {
+    publications {
+        register('mavenJava', MavenPublication) {
+            from components.java
         }
     }
 }
