@@ -138,6 +138,66 @@ class ZstdNettyPipelineTest {
     }
 
     @Test
+    void asyncDecompressionKeepsFrameOrder() throws Exception {
+        var first = new byte[96 * 1024];
+        var second = new byte[96 * 1024];
+        java.util.Arrays.fill(first, (byte) 'a');
+        java.util.Arrays.fill(second, (byte) 'b');
+        var decoder = new EmbeddedChannel(new ZstdNettyDecoder(ZstdFrameStats.NONE));
+        try {
+            var firstWire = Unpooled.buffer();
+            var secondWire = Unpooled.buffer();
+            try (var stream = new mys.zstdnet.reborn.core.protocol.ZstdPersistentStreamCodec(9, null)) {
+                ZstdFrameCodec.writeFrame(Unpooled.wrappedBuffer(first), stream, false, firstWire);
+                ZstdFrameCodec.writeFrame(Unpooled.wrappedBuffer(second), stream, false, secondWire);
+            }
+            var combined = Unpooled.buffer(firstWire.readableBytes() + secondWire.readableBytes());
+            combined.writeBytes(firstWire).writeBytes(secondWire);
+            firstWire.release();
+            secondWire.release();
+            decoder.writeInbound(combined);
+            decoder.checkException();
+            ByteBuf actualFirst = awaitInbound(decoder);
+            ByteBuf actualSecond = awaitInbound(decoder);
+            try {
+                assertEquals(first.length, actualFirst.readableBytes());
+                assertEquals(second.length, actualSecond.readableBytes());
+                assertEquals((byte) 'a', actualFirst.getByte(actualFirst.readerIndex()));
+                assertEquals((byte) 'b', actualSecond.getByte(actualSecond.readerIndex()));
+            } finally {
+                actualFirst.release();
+                actualSecond.release();
+            }
+        } finally {
+            decoder.finishAndReleaseAll();
+        }
+    }
+
+    @Test
+    void inboundBackpressureRestoresAutoReadAfterLargeFrame() throws Exception {
+        var raw = new byte[96 * 1024];
+        java.util.Arrays.fill(raw, (byte) 'p');
+        var decoder = new EmbeddedChannel(new ZstdNettyDecoder(ZstdFrameStats.NONE));
+        try {
+            var wire = encodeFrame(raw);
+            decoder.writeInbound(wire);
+            decoder.checkException();
+            awaitInbound(decoder).release();
+            decoder.runPendingTasks();
+            assertTrue(decoder.config().isAutoRead());
+        } finally {
+            decoder.finishAndReleaseAll();
+        }
+    }
+
+    @Test
+    void decompressionUsesBoundedSharedPool() {
+        assertTrue(ZstdCompressionPool.maximumThreads() >= 4);
+        assertTrue(ZstdCompressionPool.maximumThreads() <= Runtime.getRuntime().availableProcessors()
+            || Runtime.getRuntime().availableProcessors() < 4);
+    }
+
+    @Test
     void decodesUncompressedSmallFrame() throws Exception {
         var raw = new byte[]{1, 2, 3, 4, 5};
         var frame = Unpooled.buffer();
@@ -347,6 +407,27 @@ class ZstdNettyPipelineTest {
         }
         assertNotNull(result, "asynchronous compressed output did not arrive");
         return result;
+    }
+
+    private static ByteBuf awaitInbound(EmbeddedChannel channel) throws InterruptedException {
+        long deadline = System.nanoTime() + 5_000_000_000L;
+        ByteBuf result;
+        while ((result = channel.readInbound()) == null && System.nanoTime() < deadline) {
+            channel.runPendingTasks();
+            channel.runScheduledPendingTasks();
+            channel.checkException();
+            Thread.yield();
+        }
+        assertNotNull(result, "asynchronous decompressed output did not arrive");
+        return result;
+    }
+
+    private static ByteBuf encodeFrame(byte[] raw) throws Exception {
+        var out = Unpooled.buffer();
+        try (var stream = new mys.zstdnet.reborn.core.protocol.ZstdPersistentStreamCodec(9, null)) {
+            ZstdFrameCodec.writeFrame(Unpooled.wrappedBuffer(raw), stream, false, out);
+        }
+        return out;
     }
 
 }

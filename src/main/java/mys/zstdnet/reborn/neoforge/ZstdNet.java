@@ -300,7 +300,8 @@ public final class ZstdNet {
         var selected = dictionaryStore.dictionary();
         var dictionary = selected == null ? "none" : selectedDictionaryDescription();
         player.connection.send(new net.minecraft.network.protocol.common.ClientboundCustomPayloadPacket(
-            new ManagementStatusPayload(injector == null ? "server_disabled" : SamePortZstdInjector.zstdState().wireName(), player.getServer().getPort(),
+            new ManagementStatusPayload(injector == null ? SamePortZstdInjector.failureStateOrDisabled().wireName()
+                : SamePortZstdInjector.zstdState().wireName(), player.getServer().getPort(),
                 stats.wireUpBytes(), stats.rawUpBytes(), stats.wireDownBytes(), stats.rawDownBytes(),
                 stats.wireUpRate(), stats.rawUpRate(), stats.wireDownRate(), stats.rawDownRate(),
                 stats.ratioPercent(), stats.connections(), compressionLevel.get(), compressionLevel.get(),

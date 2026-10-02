@@ -6,6 +6,7 @@ import java.nio.file.Path;
 import java.util.Properties;
 
 public final class ClientConfig {
+    static final int DEFAULT_COMPRESSION_LEVEL = 6;
     private final int compressionLevel;
 
     private ClientConfig(int compressionLevel) {
@@ -21,7 +22,7 @@ public final class ClientConfig {
             } catch (IOException ignored) {
             }
         } else {
-            props.setProperty("compression-level", "6");
+            props.setProperty("compression-level", Integer.toString(DEFAULT_COMPRESSION_LEVEL));
             try {
                 Files.createDirectories(configDir);
                 try (var out = Files.newOutputStream(path)) {
@@ -43,7 +44,7 @@ public final class ClientConfig {
         try {
             return Integer.parseInt(raw);
         } catch (NumberFormatException e) {
-            return 6;
+            return DEFAULT_COMPRESSION_LEVEL;
         }
     }
 }

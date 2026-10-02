@@ -29,6 +29,14 @@ public final class CompressionMetrics {
         asyncMicros.add(Math.max(0L, elapsedNanos / 1_000L));
     }
 
+    public void recordAsync(int rawBytes, int batchPackets, long elapsedNanos) {
+        frames.increment();
+        if (batchPackets > 1) batches.increment();
+        asyncMicros.add(Math.max(0L, elapsedNanos / 1_000L));
+        maxFrameMicros.accumulateAndGet(Math.max(0L, elapsedNanos / 1_000L), Math::max);
+        sizeHistogram[bucket(rawBytes)].increment();
+    }
+
     public void recordDegraded() {
         degraded.increment();
     }

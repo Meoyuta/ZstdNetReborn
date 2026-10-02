@@ -45,8 +45,8 @@ The configuration directory and file are created automatically on first startup.
 When there is no valid probe result in the cache, the following actions are performed:
 
 - Remove any existing pending-installation record for the address.
-- Start one background probe.
-- Continue the current Minecraft connection using the ordinary protocol.
+- Wait for the probe for at most 300 ms; if it does not complete successfully, keep the background probe running.
+- Continue the current Minecraft connection using the ordinary protocol when the probe fails or times out.
 
 When the cached result indicates support, the connection-preparation queue stores the host, port, client compression level, and a 15-second expiration time. At most eight pending-installation records are retained for one address; expired records are cleaned up by a new preparation request.
 
@@ -220,13 +220,13 @@ The decoder parses headers, control frames, and ordinary frames on the event loo
 When the raw length reaches 64 KiB:
 
 1. The decoder retains the payload from the input `ByteBuf`.
-2. It submits the decompression task to the connection's dedicated single-thread daemon executor.
+2. It submits the decompression task to the shared bounded compression worker pool. Each connection still permits only one task in flight.
 3. The event loop pauses further parsing for that connection to preserve persistent-stream order.
 4. The worker returns the result to the event loop when it completes.
 5. A successful result is passed to the next handler; a failure is propagated and the connection is closed.
 6. The event loop triggers the decoder again to process bytes accumulated while the worker was running.
 
-Only one decompression task runs per connection. The single-thread executor protects the persistent Zstd stream context and preserves frame-delivery order. When the connection closes or fails, the executor is stopped and the persistent stream is closed.
+Only one decompression task runs per connection. The per-connection single-flight rule protects the persistent Zstd stream context and preserves frame-delivery order while allowing worker threads to be shared. If the worker queue is full, the decoder falls back to synchronous decompression; inbound cumulation is capped at 8 MiB while the asynchronous task is in flight.
 
 ## 10. Dictionary Synchronization
 
@@ -254,7 +254,7 @@ Dictionary acknowledgements, rejections, and errors are recorded with the `Dicti
 
 ### 10.3 Suppressing Duplicate Offers
 
-The server records download-dictionary delivery state by remote host name and dictionary ID. If the same host has already received the same ID, later short connections skip the duplicate offer. When the dictionary ID changes, the record is updated and the offer is sent again. The host key does not include the temporary port that changes between connections.
+The server records download-dictionary delivery state by remote host name and dictionary ID. If the same host has already received the same ID, later short connections skip the duplicate offer and receive a lightweight directional confirmation. The client activates the confirmation only when its local dictionary has the same ID. When the dictionary ID changes, the record is updated and the full offer is sent again. The host key does not include the temporary port that changes between connections.
 
 ## 11. Vanilla Compression Negotiation and Third-Party Mods
 
@@ -292,6 +292,8 @@ From the server's perspective, the following are recorded:
 - Maximum frame duration.
 - Raw-data-size histogram.
 
+`compress_sync_us` and `compress_async_us` measure codec compression work only; Netty `ctx.write` completion and network flush time are not included.
+
 A non-zero `compress_dropped` should be treated as a protocol-defect signal indicating that frames may have been dropped.
 
 ### 13.3 Status and Debugging
@@ -299,11 +301,9 @@ A non-zero `compress_dropped` should be treated as a protocol-defect signal indi
 Connection and service statuses include:
 
 - `active`
-- `not_installed`
 - `inject_failed`
 - `probe_failed`
 - `server_disabled`
-- `peer_unsupported`
 
 The management payload and overlay display connection status, upstream/downstream levels, traffic, compression ratio, dictionary connection count, dictionary fallback count, and RTT.
 
@@ -334,7 +334,7 @@ When a connection closes:
 
 - The encoder cancels its scheduled flush and releases pending `ByteBuf` instances.
 - The encoder and decoder close their persistent Zstandard streams.
-- The decoder stops the asynchronous decompression executor.
+- The decoder releases its per-connection asynchronous state; the shared worker pool remains available to other connections.
 - The dictionary session clears download and activation state.
 - The server removes the connection from active-IP counts and statistics.
 - An incomplete dictionary download records the failure reason.

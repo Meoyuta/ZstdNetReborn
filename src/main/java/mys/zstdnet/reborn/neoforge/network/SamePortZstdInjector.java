@@ -105,6 +105,10 @@ public final class SamePortZstdInjector implements AutoCloseable {
         };
     }
 
+    public static ZstdState failureStateOrDisabled() {
+        return lastState == InjectState.OK ? ZstdState.SERVER_DISABLED : ZstdState.INJECT_FAILED;
+    }
+
     @Override
     public void close() {
         for (Channel channel : injectedServerChannels) {

@@ -172,7 +172,17 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
                 if (dictionaryActive.compareAndSet(true, false)) stats.addDictionaryConnection(activeDictionaryId.get(), -1);
                 if (fallbackActive.compareAndSet(true, false)) stats.addActiveDictionaryFallback(-1);
             });
-            var session = ZstdDictionarySession.server(offered, dictionaryStore.uplinkDictionary(),
+            var session = offered == null && selectedDictionary != null
+                ? ZstdDictionarySession.serverReusingDownlink(selectedDictionary,
+                    new mys.zstdnet.reborn.core.netty.ZstdDictionaryDownloadListener() {
+                        public void started(long id, int bytes) {}
+                        public void progress(int received, int total) {}
+                        public void completed(long id) {}
+                        public void failed(String message) { logger.warn(message); }
+                        public void failed(mys.zstdnet.reborn.core.netty.ZstdDictionaryDownloadListener.DictionaryFailure reason,
+                                           String message) { logger.warn(message); }
+                    }, selectedDictionary.id())
+                : ZstdDictionarySession.server(offered, dictionaryStore.uplinkDictionary(),
                 new mys.zstdnet.reborn.core.netty.ZstdDictionaryDownloadListener() {
                     public void started(long id, int bytes) {
                         logger.info("Sending dictionary id=" + Long.toUnsignedString(id)

@@ -4,6 +4,7 @@ import mys.zstdnet.reborn.core.netty.ZstdFrameStats;
 import mys.zstdnet.reborn.core.netty.ZstdDictionarySession;
 import mys.zstdnet.reborn.core.netty.ZstdNettyPipeline;
 import mys.zstdnet.reborn.neoforge.helper.SableCompat;
+import mys.zstdnet.reborn.neoforge.network.ZstdState;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.socket.DatagramChannel;
 
@@ -17,6 +18,7 @@ public final class ZstdNetConnectionHooks {
     private static final long PENDING_CONNECT_TTL_MS = 15_000L;
     private static final Map<String, ConcurrentLinkedQueue<PendingConnection>> PENDING = new ConcurrentHashMap<>();
     private static final int MAX_PENDING_PER_KEY = 8;
+    private static volatile ZstdState lastState = ZstdState.SERVER_DISABLED;
 
     private ZstdNetConnectionHooks() {
     }
@@ -30,9 +32,15 @@ public final class ZstdNetConnectionHooks {
 
         var config = ZstdNetClient.config();
         var capability = CapabilityProbe.cached(host, port);
+        if (capability == null) {
+            capability = CapabilityProbe.awaitResult(host, port, 300L);
+        }
         if (!Boolean.TRUE.equals(capability)) {
             PENDING.remove(key(host, port));
             CapabilityProbe.start(host, port);
+            lastState = ZstdState.PROBE_FAILED;
+            ZstdNetClient.logger().info("ZstdNet capability probe failed or timed out for "
+                + host + ":" + port + "; using the ordinary protocol (no compression for this connection)");
             ZstdNetClient.logger().debug("ZstdNet capability probe pending or failed; using ordinary connection for "
                 + host + ":" + port);
             return false;
@@ -48,7 +56,12 @@ public final class ZstdNetConnectionHooks {
         while (queue.size() >= MAX_PENDING_PER_KEY) queue.poll();
         queue.add(pending);
         ZstdNetClient.logger().info("prepared ZstdNet pipeline for " + host + ":" + port);
+        lastState = ZstdState.ACTIVE;
         return true;
+    }
+
+    public static ZstdState lastState() {
+        return lastState;
     }
 
     public static void install(ChannelPipeline pipeline) {
@@ -81,7 +94,8 @@ public final class ZstdNetConnectionHooks {
             true,
             ZstdFrameStats.NONE,
             ZstdDictionarySession.client(ZstdNetClient::receiveServerDictionary,
-                ZstdNetClient.dictionaryDownloadListener(), ZstdNetClient.uplinkDictionary())
+                ZstdNetClient.dictionaryDownloadListener(), ZstdNetClient.uplinkDictionary(),
+                ZstdNetClient.downlinkDictionary())
         );
         ZstdNetClient.logger().info("installed ZstdNet pipeline for " + pending.host() + ":" + pending.port());
         ZstdNetClient.logger().debug("TCP pipeline installed: " + pipeline.names());

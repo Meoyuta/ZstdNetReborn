@@ -13,6 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ProtocolTest {
     @Test
@@ -25,6 +26,24 @@ class ProtocolTest {
             assertNotNull(read);
             assertEquals(value, read.value());
             assertEquals(encoded.length, read.next());
+        }
+    }
+
+    @Test
+    void capabilityResponseAndStreamHeaderUseTheSameProtocolVersion() {
+        assertEquals(ZstdFrameCodec.PROTOCOL_VERSION,
+            ZstdFrameCodec.CAPABILITY_RESPONSE[ZstdFrameCodec.CAPABILITY_RESPONSE.length - 1]);
+        assertEquals(ZstdFrameCodec.PROTOCOL_VERSION, mys.zstdnet.reborn.core.netty.ZstdStreamHeader.PROTOCOL_VERSION);
+    }
+
+    @Test
+    void rejectsMismatchedStreamHeaderVersion() {
+        var header = Unpooled.buffer().writeByte(ZstdFrameCodec.PROTOCOL_VERSION + 1);
+        try {
+            assertThrows(java.io.IOException.class,
+                () -> mys.zstdnet.reborn.core.netty.ZstdStreamHeader.read(header));
+        } finally {
+            header.release();
         }
     }
 

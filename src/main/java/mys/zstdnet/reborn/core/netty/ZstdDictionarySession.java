@@ -17,6 +17,7 @@ public final class ZstdDictionarySession {
     private static final int DIRECTIONAL_ACKNOWLEDGE = 4;
     private static final int STREAM_RESET = 5;
     private static final int DIRECTIONAL_REJECT = 6;
+    private static final int DIRECTIONAL_CONFIRM = 7;
     private static final int SERVER_TO_CLIENT = 0;
     private static final int CLIENT_TO_SERVER = 1;
     private static final int CONTROL_HEADER_BYTES = 13;
@@ -27,6 +28,8 @@ public final class ZstdDictionarySession {
     private final DictionaryReceiver receiver;
     private final ZstdDictionaryDownloadListener downloadListener;
     private final boolean directional;
+    private final ZstdDictionary cachedInbound;
+    private final long confirmationId;
 
     private volatile ZstdDictionary activeOutbound;
     private volatile ZstdDictionary activeInbound;
@@ -38,16 +41,25 @@ public final class ZstdDictionarySession {
     private boolean acknowledgementPending;
     private boolean announcedDownload;
     private boolean inboundStreamReset;
+    private boolean confirmationSent;
+
+    private ZstdDictionarySession(Role role, ZstdDictionary outboundOffer, ZstdDictionary expectedInbound,
+                                   DictionaryReceiver receiver, ZstdDictionaryDownloadListener listener,
+                                   boolean directional) {
+        this(role, outboundOffer, expectedInbound, receiver, listener, directional, null, Long.MIN_VALUE);
+    }
 
     private ZstdDictionarySession(Role role, ZstdDictionary outboundOffer, ZstdDictionary expectedInbound,
                                   DictionaryReceiver receiver, ZstdDictionaryDownloadListener listener,
-                                  boolean directional) {
+                                  boolean directional, ZstdDictionary cachedInbound, long confirmationId) {
         this.role = role;
         this.outboundOffer = outboundOffer;
         this.expectedInbound = expectedInbound;
         this.receiver = receiver;
         this.downloadListener = listener == null ? ZstdDictionaryDownloadListener.NONE : listener;
         this.directional = directional;
+        this.cachedInbound = cachedInbound;
+        this.confirmationId = confirmationId;
     }
 
     public static ZstdDictionarySession client(DictionaryReceiver receiver, ZstdDictionaryDownloadListener listener) {
@@ -58,8 +70,13 @@ public final class ZstdDictionarySession {
     /** Creates a directional client session; outbound is offered to the server. */
     public static ZstdDictionarySession client(DictionaryReceiver receiver, ZstdDictionaryDownloadListener listener,
                                                ZstdDictionary outbound) {
+        return client(receiver, listener, outbound, null);
+    }
+
+    public static ZstdDictionarySession client(DictionaryReceiver receiver, ZstdDictionaryDownloadListener listener,
+                                               ZstdDictionary outbound, ZstdDictionary cachedInbound) {
         return new ZstdDictionarySession(Role.CLIENT, outbound, null,
-                Objects.requireNonNull(receiver, "receiver"), listener, true);
+                Objects.requireNonNull(receiver, "receiver"), listener, true, cachedInbound, Long.MIN_VALUE);
     }
 
     public static ZstdDictionarySession server(ZstdDictionary dictionary) {
@@ -76,6 +93,13 @@ public final class ZstdDictionarySession {
                                                ZstdDictionaryDownloadListener listener) {
         return new ZstdDictionarySession(Role.SERVER, outbound, inbound, null, listener, true);
     }
+
+    public static ZstdDictionarySession serverReusingDownlink(ZstdDictionary inbound,
+                                                               ZstdDictionaryDownloadListener listener,
+                                                               long dictionaryId) {
+        return new ZstdDictionarySession(Role.SERVER, null, inbound, null, listener, true, null, dictionaryId);
+    }
+
 
     public static ZstdDictionarySession withoutDictionary() {
         return new ZstdDictionarySession(Role.NONE, null, null, null,
@@ -112,6 +136,15 @@ public final class ZstdDictionarySession {
             writeVarInt(out, 0);
             writeVarInt(out, payloadLength << 1);
             writeOfferPayload(out, outboundOffer, direction, directional);
+            return true;
+        }
+        if (confirmationId != Long.MIN_VALUE && !confirmationSent) {
+            confirmationSent = true;
+            writeVarInt(out, 0);
+            writeVarInt(out, 20);
+            out.writeByte(DIRECTIONAL_CONFIRM);
+            out.writeByte(SERVER_TO_CLIENT);
+            out.writeLong(confirmationId);
             return true;
         }
         if (directional && role == Role.SERVER && expectedInbound != null && !inboundOfferSent) {
@@ -165,6 +198,8 @@ public final class ZstdDictionarySession {
         } else if (type == LEGACY_ACKNOWLEDGE || type == DIRECTIONAL_ACKNOWLEDGE || type == DIRECTIONAL_REJECT) {
             receiveAcknowledgement(in, type == DIRECTIONAL_ACKNOWLEDGE || type == DIRECTIONAL_REJECT,
                 type == DIRECTIONAL_REJECT);
+        } else if (type == DIRECTIONAL_CONFIRM) {
+            receiveConfirmation(in);
         } else if (type == STREAM_RESET) {
             if (in.readableBytes() != 1) throw new IOException("invalid ZstdNet stream reset control record");
             synchronized (this) {
@@ -266,6 +301,21 @@ public final class ZstdDictionarySession {
         }
     }
 
+    private synchronized void receiveConfirmation(ByteBuf in) throws IOException {
+        if (role != Role.CLIENT || !directional || cachedInbound == null || in.readableBytes() != 10) {
+            throw new IOException("unexpected ZstdNet dictionary confirmation");
+        }
+        in.readUnsignedByte();
+        int direction = in.readUnsignedByte();
+        long id = in.readLong();
+        if (direction != SERVER_TO_CLIENT || cachedInbound.id() != id) {
+            throw new IOException("ZstdNet dictionary confirmation does not match cached dictionary");
+        }
+        activeInbound = cachedInbound;
+        downloadListener.completed(id);
+    }
+
+
     private static void writeOfferPayload(ByteBuf out, ZstdDictionary dictionary, int direction, boolean directional) {
         byte[] bytes = dictionary.bytes();
         out.writeByte(directional ? DIRECTIONAL_OFFER : LEGACY_OFFER);
@@ -287,7 +337,8 @@ public final class ZstdDictionarySession {
     }
 
     public synchronized boolean hasPendingControl() {
-        return outboundOffer != null && !offerSent || acknowledgementPending;
+        return outboundOffer != null && !offerSent || acknowledgementPending
+            || confirmationId != Long.MIN_VALUE && !confirmationSent;
     }
 
     public static void writeStreamResetControl(ByteBuf out) {

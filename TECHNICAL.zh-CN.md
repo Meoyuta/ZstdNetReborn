@@ -45,8 +45,8 @@ ConnectScreenMixin 在 ConnectScreen.startConnecting 入口调用 ZstdNetConnect
 若当缓存中没有有效的探测结果时,则会做以下操作：
 
 - 删除该地址已有的待安装记录
-- 启动一次后台探测
-- 当前 Minecraft 连接按普通连接继续
+- 最多等待探测 300 ms；若未成功完成则启动或保留后台探测
+- 探测失败或超时时，当前 Minecraft 连接按普通协议继续
 
 当缓存结果为支持时,连接准备队列写入主机、端口、客户端压缩等级和 15 秒过期时间；同一地址最多保留 8 条待安装记录,过期记录会在新的准备请求中清理
 
@@ -220,13 +220,13 @@ decoder 在 event loop 中解析 header、控制帧和普通帧；小于 64 KiB 
 原始长度达到 64 KiB 时：
 
 1. decoder 从输入 ByteBuf 保留 payload
-2. 将解压任务提交到该连接专用的单线程 daemon executor
+2. 将解压任务提交到共享有界压缩 worker 池；每个连接同时仍只允许一个任务在运行
 3. event loop 暂停继续解析该连接,保持持久流顺序
 4. worker 完成后回到 event loop
 5. 成功结果交给后续 handler,失败则传播异常并关闭连接
 6. event loop 重新触发 decoder,处理 worker 期间累积的字节
 
-每个连接只有一个解压任务在运行,单线程 executor 既保护了 Zstd 持久流上下文,也保证了帧交付顺序。当连接关闭或异常时，将停止 executor ，同时关闭持久流
+每个连接只有一个解压任务在运行；单飞规则保护 Zstd 持久流上下文并保证帧交付顺序，同时让多个连接共享 worker 线程。worker 队列满时回退同步解压；异步任务运行期间，入站 cumulation 上限为 8 MiB，达到上限后暂停 Netty auto-read。
 
 ## 10. 字典同步
 
@@ -254,7 +254,7 @@ decoder 在 event loop 中解析 header、控制帧和普通帧；小于 64 KiB 
 
 ### 10.3 重复下发抑制
 
-服务端使用远端主机名和字典 ID 记录下行字典发送状态。同一主机已收到相同 ID 时,后续短连接跳过重复 offer；字典 ID 变化时更新记录并重新发送。主机键不会包含每次连接变化的临时端口
+服务端使用远端主机名和字典 ID 记录下行字典发送状态。同一主机已收到相同 ID 时,后续短连接跳过重复 offer，改为发送轻量方向确认；客户端只有在本地字典 ID 相同时才激活确认。字典 ID 变化时更新记录并重新发送完整 offer。主机键不会包含每次连接变化的临时端口
 
 ## 11. 原版压缩协商与第三方模组
 
@@ -292,6 +292,8 @@ CompressionMetrics 使用并发计数器记录：
 - 最大帧耗时
 - 原始数据大小直方图
 
+`compress_sync_us` 和 `compress_async_us` 只统计 codec 压缩阶段；不包含 Netty `ctx.write` 完成和网络 flush 的时间。
+
 注意：compress_dropped 非零应视为协议缺陷信号，说明可能有丢帧情况发生
 
 ### 13.3 状态和 debug
@@ -299,11 +301,9 @@ CompressionMetrics 使用并发计数器记录：
 连接/服务状态包括：
 
 - active
-- not_installed
 - inject_failed
 - probe_failed
 - server_disabled
-- peer_unsupported
 
 管理 payload 和 overlay 显示连接状态、上下行等级、流量、压缩比例、字典连接数、字典降级数和 RTT
 
@@ -334,7 +334,7 @@ CompressionMetrics 使用并发计数器记录：
 
 - encoder 取消定时 flush,释放 pending ByteBuf
 - encoder 和 decoder 关闭持久 Zstandard 流
-- decoder 停止异步解压 executor
+- decoder 释放连接级异步状态；共享 worker 池继续供其他连接使用
 - 字典会话清理下载和激活状态
 - 服务端从活跃 IP 计数和统计中移除连接
 - 未完成的字典下载记录失败原因
@@ -364,5 +364,3 @@ ZstdNet 只处理 Minecraft TCP。Sable 的 UDP pipeline、独立 DatagramChanne
 常规 Gradle 回归测试为：
 
     ./gradlew test
-
-

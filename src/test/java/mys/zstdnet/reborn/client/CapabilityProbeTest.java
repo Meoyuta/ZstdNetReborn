@@ -45,6 +45,17 @@ class CapabilityProbeTest {
         }
     }
 
+    @Test
+    void awaitResultEnablesFirstConnectionProbeWithinBound() throws Exception {
+        try (var server = new ServerSocket(0)) {
+            var worker = respondOnce(server, ZstdFrameCodec.CAPABILITY_RESPONSE, false);
+            long started = System.nanoTime();
+            assertEquals(Boolean.TRUE, CapabilityProbe.awaitResult("127.0.0.1", server.getLocalPort(), 300L));
+            assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) < 1_000L);
+            worker.join(2_000L);
+        }
+    }
+
     private static Thread respondOnce(ServerSocket server, byte[] response, boolean holdOpen) {
         var worker = Thread.ofPlatform().daemon().start(() -> {
             try (Socket socket = server.accept()) {

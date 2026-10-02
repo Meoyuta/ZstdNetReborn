@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.IntSupplier;
 import mys.zstdnet.reborn.core.stats.CompressionMetrics;
 import org.slf4j.Logger;
@@ -21,6 +22,7 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     private static final int MAX_BATCH_BYTES = 64 * 1024;
     private static final int FLUSH_DELAY_MILLIS = 2;
     private static final int MAX_PENDING_PACKETS = 4096;
+    private static final int ASYNC_COMPRESSION_THRESHOLD = 64 * 1024;
     private static final CompressionMetrics GLOBAL_METRICS = new CompressionMetrics();
     private final IntSupplier level;
     private final boolean sendMagic;
@@ -37,6 +39,7 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     private final ArrayDeque<PendingWrite> pending = new ArrayDeque<>();
     private int pendingBytes;
     private ScheduledFuture<?> scheduledFlush;
+    private boolean asyncCompressionInFlight;
 
     public ZstdNettyEncoder(int level, boolean sendMagic, ZstdFrameStats stats) {
         this(() -> level, sendMagic, stats, null);
@@ -82,6 +85,12 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
         if (!(message instanceof ByteBuf msg)) {
             flushPending(ctx);
             ctx.write(message, promise);
+            return;
+        }
+        if (asyncCompressionInFlight) {
+            pending.addLast(new PendingWrite(msg, promise));
+            pendingBytes += msg.readableBytes();
+            if (pending.size() >= MAX_PENDING_PACKETS) flushPending(ctx);
             return;
         }
         if (closed || !ctx.channel().isActive()) {
@@ -187,6 +196,8 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
             return;
         }
         if (!ctx.channel().isWritable() || pendingBytes >= MAX_BATCH_BYTES) {
+            // The size check is a defensive flush for callers that append directly to the FIFO.
+            // write() already flushes before the queue can exceed MAX_BATCH_BYTES.
             flushPending(ctx);
             ctx.flush();
             return;
@@ -195,7 +206,7 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     }
 
     private void flushPending(io.netty.channel.ChannelHandlerContext ctx) {
-        if (pending.isEmpty()) return;
+        if (pending.isEmpty() || asyncCompressionInFlight) return;
         cancelScheduledFlush();
         var batch = new ArrayList<PendingWrite>(pending);
         pending.clear();
@@ -221,6 +232,11 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
             raw.writeBytes(item.message, item.message.readerIndex(), item.message.readableBytes());
             item.message.release();
         }
+        if (total >= ASYNC_COMPRESSION_THRESHOLD) {
+            asyncCompressionInFlight = true;
+            submitAsyncBatch(ctx, batch, raw, total);
+            return;
+        }
         ByteBuf encoded = ctx.alloc().buffer();
         long started = System.nanoTime();
         boolean rawReleased = false;
@@ -241,14 +257,89 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
                 }
                 if (!future.isSuccess()) ctx.close();
             });
+            long compressionNanos = System.nanoTime() - started;
+            metrics.recordSync(total, batch.size(), compressionNanos);
             ctx.write(encoded, aggregate);
-            metrics.recordSync(total, batch.size(), System.nanoTime() - started);
         } catch (Throwable error) {
             if (!rawReleased) raw.release();
             encoded.release();
             for (var item : batch) item.promise.tryFailure(error);
             ctx.fireExceptionCaught(error);
             ctx.close();
+        }
+    }
+
+    private void submitAsyncBatch(io.netty.channel.ChannelHandlerContext ctx, List<PendingWrite> batch,
+                                  ByteBuf raw, int total) {
+        long started = System.nanoTime();
+        try {
+            ZstdCompressionPool.execute(() -> {
+                ByteBuf encoded = ctx.alloc().buffer();
+                Throwable failure = null;
+                try {
+                    encode(ctx, raw, encoded);
+                } catch (Throwable error) {
+                    failure = error;
+                } finally {
+                    raw.release();
+                }
+                var result = failure;
+                ctx.executor().execute(() -> {
+                    asyncCompressionInFlight = false;
+                    metrics.recordAsync(total, batch.size(), System.nanoTime() - started);
+                    if (result != null || closed || !ctx.channel().isActive()) {
+                        encoded.release();
+                        for (var item : batch) item.promise.tryFailure(
+                            result == null ? new ClosedChannelException() : result);
+                        if (result != null) ctx.fireExceptionCaught(result);
+                        ctx.close();
+                        return;
+                    }
+                    if (!encoded.isReadable()) {
+                        encoded.release();
+                        for (var item : batch) item.promise.trySuccess();
+                    } else {
+                        var aggregate = ctx.newPromise();
+                        aggregate.addListener(future -> {
+                            for (var item : batch) {
+                                if (future.isSuccess()) item.promise.trySuccess();
+                                else item.promise.tryFailure(future.cause());
+                            }
+                            if (!future.isSuccess()) ctx.close();
+                        });
+                        ctx.write(encoded, aggregate);
+                    }
+                    flushPending(ctx);
+                    if (!pending.isEmpty()) ctx.flush();
+                });
+            });
+        } catch (RejectedExecutionException rejected) {
+            asyncCompressionInFlight = false;
+            ByteBuf encoded = ctx.alloc().buffer();
+            try {
+                encode(ctx, raw, encoded);
+                raw.release();
+                if (!encoded.isReadable()) {
+                    encoded.release();
+                    for (var item : batch) item.promise.trySuccess();
+                } else {
+                    var aggregate = ctx.newPromise();
+                    aggregate.addListener(future -> {
+                        for (var item : batch) {
+                            if (future.isSuccess()) item.promise.trySuccess();
+                            else item.promise.tryFailure(future.cause());
+                        }
+                        if (!future.isSuccess()) ctx.close();
+                    });
+                    ctx.write(encoded, aggregate);
+                }
+            } catch (Throwable error) {
+                raw.release();
+                encoded.release();
+                for (var item : batch) item.promise.tryFailure(error);
+                ctx.fireExceptionCaught(error);
+                ctx.close();
+            }
         }
     }
 

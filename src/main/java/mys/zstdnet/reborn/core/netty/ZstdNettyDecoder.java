@@ -7,8 +7,7 @@ import io.netty.handler.codec.ByteToMessageDecoder;
 
 import java.io.IOException;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 public final class ZstdNettyDecoder extends ByteToMessageDecoder {
     private final ZstdFrameStats stats;
@@ -17,13 +16,9 @@ public final class ZstdNettyDecoder extends ByteToMessageDecoder {
     private ZstdPersistentStreamCodec persistentStream;
     private long persistentDictionaryId = Long.MIN_VALUE;
     private boolean ownsPersistentStream = true;
-    private final ExecutorService decompressionExecutor = Executors.newSingleThreadExecutor(task -> {
-        var thread = new Thread(task, "zstdnet-decompression");
-        thread.setDaemon(true);
-        return thread;
-    });
     private boolean asyncDecompressionInFlight;
     private static final int ASYNC_DECOMPRESSION_THRESHOLD = 64 * 1024;
+    private static final int MAX_PENDING_INBOUND_BYTES = 8 * 1024 * 1024;
 
     public ZstdNettyDecoder(ZstdFrameStats stats) {
         this(stats, null);
@@ -46,7 +41,15 @@ public final class ZstdNettyDecoder extends ByteToMessageDecoder {
 
     @Override
     protected void decode(io.netty.channel.ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
-        if (asyncDecompressionInFlight) return;
+        if (asyncDecompressionInFlight) {
+            if (in.readableBytes() >= MAX_PENDING_INBOUND_BYTES) {
+                ctx.channel().config().setAutoRead(false);
+            }
+            if (in.readableBytes() > MAX_PENDING_INBOUND_BYTES) {
+                throw new IOException("ZstdNet inbound cumulation exceeded limit while decompressing");
+            }
+            return;
+        }
         if (dictionarySession != null && dictionarySession.expectsHeader() && !streamHeaderRead) {
             if (!ZstdStreamHeader.read(in)) {
                 return;
@@ -145,33 +148,54 @@ public final class ZstdNettyDecoder extends ByteToMessageDecoder {
                 asyncDecompressionInFlight = true;
                 var wireBytes = in.readerIndex() - frameStart;
                 var asyncStream = persistentStream;
-                decompressionExecutor.execute(() -> {
-                    Throwable failure = null;
+                try {
+                    ZstdCompressionPool.execute(() -> {
+                        Throwable failure = null;
+                        try {
+                            asyncStream.decompress(payload, rawLength, raw);
+                        } catch (Throwable error) {
+                            failure = error;
+                        } finally {
+                            payload.release();
+                        }
+                        var result = failure;
+                        ctx.executor().execute(() -> {
+                            asyncDecompressionInFlight = false;
+                            if (result != null || !ctx.channel().isActive()) {
+                                raw.release();
+                                if (result != null) {
+                                    ctx.fireExceptionCaught(result);
+                                }
+                                restoreAutoRead(ctx);
+                                return;
+                            }
+                            stats.inbound(rawLength, wireBytes);
+                            stats.inboundSample(raw);
+                            ctx.fireChannelRead(raw);
+                            restoreAutoRead(ctx);
+                            // Re-enter this decoder without sending the signal through upstream handlers.
+                            try {
+                                super.channelRead(ctx, io.netty.buffer.Unpooled.EMPTY_BUFFER);
+                            } catch (Exception error) {
+                                ctx.fireExceptionCaught(error);
+                                ctx.close();
+                            }
+                        });
+                    });
+                } catch (RejectedExecutionException rejected) {
+                    asyncDecompressionInFlight = false;
                     try {
-                        asyncStream.decompress(payload, rawLength, raw);
-                    } catch (Throwable error) {
-                        failure = error;
+                        persistentStream.decompress(payload, rawLength, raw);
+                    } catch (Exception error) {
+                        raw.release();
+                        throw error;
                     } finally {
                         payload.release();
                     }
-                    var result = failure;
-                    ctx.executor().execute(() -> {
-                        asyncDecompressionInFlight = false;
-                        if (result != null || !ctx.channel().isActive()) {
-                            raw.release();
-                            if (result != null) {
-                                ctx.fireExceptionCaught(result);
-                                ctx.close();
-                            }
-                            return;
-                        }
-                        stats.inbound(rawLength, wireBytes);
-                        stats.inboundSample(raw);
-                        ctx.fireChannelRead(raw);
-                        // Re-enter the decoder for bytes accumulated while the worker ran.
-                        ctx.pipeline().fireChannelRead(io.netty.buffer.Unpooled.EMPTY_BUFFER);
-                    });
-                });
+                    stats.inbound(rawLength, wireBytes);
+                    stats.inboundSample(raw);
+                    out.add(raw);
+                }
                 return;
             }
             try {
@@ -195,7 +219,6 @@ public final class ZstdNettyDecoder extends ByteToMessageDecoder {
         } finally {
             if (dictionarySession != null) dictionarySession.disconnected();
             closePersistentStream();
-            decompressionExecutor.shutdownNow();
         }
     }
 
@@ -203,9 +226,14 @@ public final class ZstdNettyDecoder extends ByteToMessageDecoder {
     public void exceptionCaught(io.netty.channel.ChannelHandlerContext ctx, Throwable cause) {
         if (dictionarySession != null) dictionarySession.disconnected();
         try { closePersistentStream(); } catch (IOException ignored) { }
-        decompressionExecutor.shutdownNow();
         ctx.fireExceptionCaught(cause);
         ctx.close();
+    }
+
+    private static void restoreAutoRead(io.netty.channel.ChannelHandlerContext ctx) {
+        if (ctx.channel().isActive() && !ctx.channel().config().isAutoRead()) {
+            ctx.channel().config().setAutoRead(true);
+        }
     }
 
     private void closePersistentStream() throws IOException {

@@ -10,18 +10,23 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.TimeUnit;
 
 final class CapabilityProbe {
     private static final int TIMEOUT_MILLIS = 1_000;
     private static final long SUCCESS_TTL_MILLIS = 5 * 60_000L;
     private static final long FAILURE_TTL_MILLIS = 30_000L;
-    private static final ExecutorService EXECUTOR = Executors.newCachedThreadPool(r -> {
-        var thread = new Thread(r, "zstdnet-capability-probe");
+    private static final AtomicInteger THREAD_ID = new AtomicInteger();
+    private static final ExecutorService EXECUTOR = new ThreadPoolExecutor(2, 4, 30L, TimeUnit.SECONDS,
+        new ArrayBlockingQueue<>(64), task -> {
+        var thread = new Thread(task, "zstdnet-capability-probe-" + THREAD_ID.incrementAndGet());
         thread.setDaemon(true);
         return thread;
-    });
+    }, new ThreadPoolExecutor.AbortPolicy());
     private static final Map<String, Cached> CACHE = new ConcurrentHashMap<>();
     private static final Map<String, CompletableFuture<Boolean>> IN_FLIGHT = new ConcurrentHashMap<>();
 
@@ -33,18 +38,38 @@ final class CapabilityProbe {
     }
 
     static void start(String host, int port) {
+        request(host, port);
+    }
+
+    static Boolean awaitResult(String host, int port, long timeoutMillis) {
+        var cached = cached(host, port);
+        if (cached != null) return cached;
+        try {
+            return request(host, port).get(timeoutMillis, TimeUnit.MILLISECONDS);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static CompletableFuture<Boolean> request(String host, int port) {
         var cacheKey = key(host, port);
-        if (cached(host, port) != null) return;
-        IN_FLIGHT.computeIfAbsent(cacheKey, ignored -> CompletableFuture
-            .supplyAsync(() -> probe(host, port), EXECUTOR)
-            .orTimeout(TIMEOUT_MILLIS + 250L, TimeUnit.MILLISECONDS)
-            .exceptionally(error -> false)
-            .whenComplete((supported, error) -> {
+        if (cached(host, port) != null) return CompletableFuture.completedFuture(cached(host, port));
+        return IN_FLIGHT.computeIfAbsent(cacheKey, ignored -> {
+            CompletableFuture<Boolean> future;
+            try {
+                future = CompletableFuture.supplyAsync(() -> probe(host, port), EXECUTOR)
+                    .orTimeout(TIMEOUT_MILLIS + 250L, TimeUnit.MILLISECONDS)
+                    .exceptionally(error -> false);
+            } catch (RejectedExecutionException rejected) {
+                future = CompletableFuture.completedFuture(false);
+            }
+            return future.whenComplete((supported, error) -> {
                 boolean result = error == null && Boolean.TRUE.equals(supported);
                 CACHE.put(cacheKey, new Cached(result, System.currentTimeMillis()
                     + (result ? SUCCESS_TTL_MILLIS : FAILURE_TTL_MILLIS)));
                 IN_FLIGHT.remove(cacheKey);
-            }));
+            });
+        });
     }
 
     private static boolean probe(String host, int port) {

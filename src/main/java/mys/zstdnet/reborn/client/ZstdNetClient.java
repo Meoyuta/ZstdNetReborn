@@ -93,6 +93,11 @@ public final class ZstdNetClient {
         return store == null ? null : store.uplinkDictionary();
     }
 
+    public static ZstdDictionary downlinkDictionary() {
+        var store = dictionaryStore;
+        return store == null ? null : store.dictionary();
+    }
+
     public static Path dictionaryPath() {
         var store = dictionaryStore;
         if (store == null) {
