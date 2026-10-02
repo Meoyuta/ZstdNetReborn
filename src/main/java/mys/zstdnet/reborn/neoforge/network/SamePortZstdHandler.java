@@ -98,6 +98,13 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
         if (in.readableBytes() < ZstdFrameCodec.MAGIC.length) {
             return;
         }
+        if (startsWith(in, ZstdFrameCodec.CAPABILITY_MAGIC)) {
+            in.skipBytes(ZstdFrameCodec.CAPABILITY_MAGIC.length);
+            ctx.writeAndFlush(Unpooled.wrappedBuffer(ZstdFrameCodec.CAPABILITY_RESPONSE))
+                .addListener(ChannelFutureListener.CLOSE);
+            logger.debug("answered ZstdNet capability probe from " + ctx.channel().remoteAddress());
+            return;
+        }
         if (startsWithMagic(in)) {
             if (!admit(ctx)) return;
             in.skipBytes(ZstdFrameCodec.MAGIC.length);
@@ -138,8 +145,10 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
             countConnection(ctx);
             var offered = dictionaryStore.dictionary();
             var dictionaryActive = new AtomicBoolean();
+            var fallbackActive = new AtomicBoolean();
             ctx.channel().closeFuture().addListener(future -> {
                 if (dictionaryActive.compareAndSet(true, false)) stats.addDictionaryConnection(offered.id(), -1);
+                if (fallbackActive.compareAndSet(true, false)) stats.addActiveDictionaryFallback(-1);
             });
             var session = ZstdDictionarySession.server(offered, dictionaryStore.uplinkDictionary(),
                 new mys.zstdnet.reborn.core.netty.ZstdDictionaryDownloadListener() {
@@ -163,8 +172,7 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
                         if (reason == mys.zstdnet.reborn.core.netty.ZstdDictionaryDownloadListener.DictionaryFailure.INBOUND_ID_MISMATCH
                             || reason == mys.zstdnet.reborn.core.netty.ZstdDictionaryDownloadListener.DictionaryFailure.OFFER_REJECTED) {
                             stats.addDictionaryFallback();
-                            stats.addActiveDictionaryFallback(1);
-                            ctx.channel().closeFuture().addListener(ignored -> stats.addActiveDictionaryFallback(-1));
+                            if (fallbackActive.compareAndSet(false, true)) stats.addActiveDictionaryFallback(1);
                         }
                         logger.warn(message);
                     }
@@ -286,6 +294,14 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
             if (in.getByte(in.readerIndex() + i) != ZstdFrameCodec.MAGIC[i]) {
                 return false;
             }
+        }
+        return true;
+    }
+
+    private static boolean startsWith(ByteBuf in, byte[] magic) {
+        if (in.readableBytes() < magic.length) return false;
+        for (int i = 0; i < magic.length; i++) {
+            if (in.getByte(in.readerIndex() + i) != magic[i]) return false;
         }
         return true;
     }

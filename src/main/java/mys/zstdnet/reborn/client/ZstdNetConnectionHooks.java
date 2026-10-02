@@ -29,9 +29,14 @@ public final class ZstdNetConnectionHooks {
         }
 
         var config = ZstdNetClient.config();
-        if (!config.enabledFor(host, port)) {
+        if (!config.enabled()) {
             PENDING.remove(key(host, port));
             ZstdNetClient.logger().debug("prepare skipped: disabled for " + host + ":" + port);
+            return false;
+        }
+        if (!CapabilityProbe.probe(host, port)) {
+            PENDING.remove(key(host, port));
+            ZstdNetClient.logger().warn("ZstdNet capability probe failed; using ordinary connection for " + host + ":" + port);
             return false;
         }
 

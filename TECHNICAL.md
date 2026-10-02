@@ -8,9 +8,11 @@
 
 ## 连接与协议
 
-客户端从 `config/zstdnet-client.properties` 读取连接选择配置。新生成配置默认禁用并使用空服务器列表，必须显式启用且配置服务器白名单后才会安装 ZstdNet，避免对未安装模组的任意服务器发送压缩流。当前没有普通服务器能力探测后的自动降级，也不支持 LAN/集成服务器；白名单地址或服务端状态不匹配时不会静默回退到普通协议。共享 Netty codec 安装在入站 AES 解密后、packet splitter 前，以及出站 AES 加密前、packet framing 后。服务端通过 Zstandard frame magic 与协议版本检测连接，匹配后安装 ZstdNet pipeline 并避免原版压缩协商。原版 status ping 透传；未安装/不匹配的连接按配置返回拒绝信息。
+客户端从 `config/zstdnet-client.properties` 读取全局连接配置，当前只有 `enabled` 和 `compression-level` 两项；新生成配置默认 `enabled=false`、客户端等级为 6。启用后每个服务器都必须先执行独立 TCP 能力探测，不再支持服务器白名单或跳过探测：客户端发送 4 字节 `ZNP` 能力探测头（版本字节 `0x01`），服务端返回相同格式的 `0x02` 响应后关闭探测连接，客户端随后才为真正的 Minecraft TCP 连接安装压缩管线。探测连接建立及读取响应的超时为 2 秒；探测失败、超时或服务端不支持时记录一次 warning，并继续使用普通明文连接。LAN/集成服务器仍不支持。共享 Netty codec 安装在入站 AES 解密后、packet splitter 前，以及出站 AES 加密前、packet framing 后。服务端先识别能力探测魔数，再识别 Zstandard frame magic 与协议版本；匹配后安装 ZstdNet pipeline 并避免原版压缩协商。原版 status ping 透传；未安装/不匹配的连接按配置返回拒绝信息。
 
 协议 v2 使用双向持久 zstd 流，每个数据帧仍显式保留原始长度和压缩块长度。`storedTag == 0` 的小帧按原始字节直通；压缩帧由持久流解压。压缩等级或字典变化时重置相应流上下文，连接关闭时释放上下文。协议版本不同步时不提供旧协议兼容；解码器遇到压缩流无进展会立即以连接错误结束，不能在 event loop 上无限等待。
+
+能力探测只用于连接选择，不会把探测字节注入 Minecraft 登录流。服务端的同端口 handler 在未决状态下仅接受完整探测魔数、返回固定响应并关闭连接；收到 Zstandard magic 才进入限流、握手和压缩管线安装流程。这样未安装 ZstdNet 的普通服务器不会收到压缩握手，客户端也不会因误装管线而破坏明文协议。
 
 编码器使用 Netty event loop 同步压缩，不再有每连接待压缩队列或全局 worker 队列。持久 zstd 流建立在连续 TCP 字节流之上，不能丢弃任意写入；同步压缩保持每个写入的字节都进入同一压缩流，并让 event loop 的阻塞形成生产者反压。Netty ByteBuf 直接作为输入，压缩输出使用引用计数 ByteBuf，样本采集最多复制 4 KiB。代价是压缩期间 event loop 会被占用，可能造成服务端 tick/网络处理卡顿，应通过实服加入突发验证其性能。
 
@@ -28,15 +30,15 @@ Sable 的激活令牌通过 Minecraft TCP 自定义 payload 传送，UDP 认证�
 
 ## Benchmark 与等级
 
-默认压缩等级为 3，`/zstdnet complevel set <1-22>` 可更改新连接使用的等级；已建立连接保持协商时等级。定时 benchmark 和自动应用等级默认关闭。管理员可用 `/zstdnet benchmark start` 手动评估；候选范围通过 `/zstdnet benchmark setbaseline <min> <max>` 配置，闭区间必须满足 1 <= min <= max <= 22，默认范围为 5-13。范围保存到 `config/zstdnet/server.properties` 的 `benchmark-baseline-min/max`。Benchmark 从真实网络包采集有界样本，在独立 executor 上使用独立 codec 和样本快照，不复用在线连接上下文。调度周期仍由 `/zstdnet benchmark interval <分钟>` 管理；定时执行可在服务器属性中显式启用。
+服务端默认压缩等级为 3，`/zstdnet complevel set <1-22>` 可更改新连接使用的服务端等级；客户端新生成配置默认等级为 6，双方等级分别作用于各自的出站流。已建立连接保持协商时等级。定时 benchmark 和自动应用等级默认关闭。管理员可用 `/zstdnet benchmark start` 手动评估；候选范围通过 `/zstdnet benchmark setbaseline <min> <max>` 配置，闭区间必须满足 1 <= min <= max <= 22，默认范围为 5-13。等级选择同时考虑压缩后大小与编解码耗时，避免只追求压缩率而选出过慢等级。范围保存到 `config/zstdnet/server.properties` 的 `benchmark-baseline-min/max`。Benchmark 从真实网络包采集有界样本，在独立 executor 上使用独立 codec 和样本快照，不复用在线连接上下文。调度周期仍由 `/zstdnet benchmark interval <分钟>` 管理；定时执行可在服务器属性中显式启用。
 
 ## 字典
 
-字典以单个 ZIP bundle 保存，包含 `uplink.zdict`（最多 64 KiB）和 `downlink.zdict`（最多 128 KiB）。训练分别收集两个方向的样本并独立训练。bundle、选择状态和待命名字典存放在 `config/zstdnet/dict/`；客户端校验服务端字典 ID 后缓存并确认，之后才启用对应方向的字典压缩。服务端发现客户端 uplink ID 不匹配时发送拒绝确认，双方该方向继续使用无字典流，避免旧客户端永久断线；当前协议仍没有服务端主动下发新 uplink 的路径。旧的单字典格式不兼容。
+字典以单个 ZIP bundle 保存，包含 `uplink.zdict`（最多 64 KiB）和 `downlink.zdict`（最多 128 KiB）。训练分别收集两个方向的样本并独立训练。bundle、选择状态和待命名字典存放在 `config/zstdnet/dict/`；客户端校验服务端字典 ID 后缓存并确认，之后才启用对应方向的字典压缩。字典失败原因使用 `INBOUND_ID_MISMATCH`、`OFFER_REJECTED`、`INVALID`、`IO` 枚举传递，不依赖错误文案匹配。服务端发现客户端 uplink ID 不匹配或拒绝 offer 时，双方该方向继续使用无字典流，并分别累计记录降级次数和当前降级连接数，避免连接因字典差异断开；当前协议仍没有服务端主动下发新 uplink 的路径。旧的单字典格式不兼容。
 
 ## 状态与诊断
 
-F8 打开 overlay 选择界面，可选 benchmark、管理状态和字典状态；只有通过 F8 菜单关闭 overlay，离开世界时会清除状态且不持久化。界面数据约每秒更新一次，不阻塞玩家移动和交互。管理状态包括压缩等级、当前 RTT、服务器视角的每秒上/下行（原始与线路字节）、运行时长和进程内 benchmark 次数。
+F8 打开 overlay 选择界面，可选 benchmark、管理状态和字典状态；只有通过 F8 菜单关闭 overlay，离开世界时会清除状态且不持久化。界面数据约每秒更新一次，不阻塞玩家移动和交互。管理状态包括压缩等级、当前 RTT、服务器视角的每秒上/下行（原始与线路字节）、运行时长、进程内 benchmark 次数，以及字典上行降级累计数和当前降级连接数；overlay 使用“累计 / 当前”格式展示，这些数值同时写入 `/zstdnet debug` 报告中的 `dictionary_uplink_fallbacks` 与 `dictionary_active_fallback_connections` 字段。
 
 `/zstdnet ping` 使用 nonce 请求/响应及 `System.nanoTime()` 测量 RTT，不复用 Minecraft 延迟值；该命令需要玩家来源以便返回结果。`/zstdnet debug` 无额外权限要求，玩家、控制台、命令方块和其他 `CommandSourceStack` 均可执行，在 `config/debug/` 写入一次性 UTF-8 诊断报告，报告中的 requester 使用命令源文本名称，包含连接、流量/压缩、benchmark、字典、服务端 tick、JVM 与玩家 RTT 拆分信息，不进行逐包持续磁盘记录。
 

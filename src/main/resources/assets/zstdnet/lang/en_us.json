@@ -69,6 +69,7 @@
   "zstdnet.screen.status.benchmark_runs": "Benchmark runs: %s",
   "zstdnet.screen.status.dictionary": "Dictionary: %s",
   "zstdnet.screen.status.dictionary_connections": "Dictionary connections: %s",
+  "zstdnet.screen.status.dictionary_fallbacks": "Dictionary fallbacks (total / active): %s",
   "zstdnet.screen.dictionary_status.title": "ZstdNet dictionary status",
   "zstdnet.screen.dictionary_status.mode": "View: %s",
   "zstdnet.screen.dictionary_status.status": "status",

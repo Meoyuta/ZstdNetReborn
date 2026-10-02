@@ -22,6 +22,8 @@ public record ManagementStatusPayload(
         String dictionary,
         int dictionaryConnections,
         int selectedDictionaryConnections,
+        int dictionaryFallbacks,
+        int activeDictionaryFallbacks,
         double latencyMillis,
         long uptimeSeconds,
         int benchmarkRuns
@@ -48,6 +50,8 @@ public record ManagementStatusPayload(
         buffer.writeUtf(payload.dictionary, 512);
         buffer.writeVarInt(payload.dictionaryConnections);
         buffer.writeVarInt(payload.selectedDictionaryConnections);
+        buffer.writeVarInt(payload.dictionaryFallbacks);
+        buffer.writeVarInt(payload.activeDictionaryFallbacks);
         buffer.writeDouble(payload.latencyMillis);
         buffer.writeVarLong(payload.uptimeSeconds);
         buffer.writeVarInt(payload.benchmarkRuns);
@@ -61,7 +65,7 @@ public record ManagementStatusPayload(
                 buffer.readVarLong(), buffer.readVarLong(),
                 buffer.readVarLong(), buffer.readVarLong(),
                 buffer.readDouble(), buffer.readVarInt(), buffer.readVarInt(),
-                buffer.readUtf(512), buffer.readVarInt(), buffer.readVarInt(), buffer.readDouble(),
+                buffer.readUtf(512), buffer.readVarInt(), buffer.readVarInt(), buffer.readVarInt(), buffer.readVarInt(), buffer.readDouble(),
                 buffer.readVarLong(), buffer.readVarInt());
     }
 

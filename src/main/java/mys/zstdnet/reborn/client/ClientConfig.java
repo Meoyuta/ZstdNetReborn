@@ -3,21 +3,15 @@ package mys.zstdnet.reborn.client;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Arrays;
-import java.util.Locale;
 import java.util.Properties;
-import java.util.Set;
-import java.util.stream.Collectors;
 
 public final class ClientConfig {
     private final boolean enabled;
     private final int compressionLevel;
-    private final Set<String> servers;
 
-    private ClientConfig(boolean enabled, int compressionLevel, Set<String> servers) {
+    private ClientConfig(boolean enabled, int compressionLevel) {
         this.enabled = enabled;
         this.compressionLevel = Math.clamp(compressionLevel, 1, 22);
-        this.servers = servers;
     }
 
     public static ClientConfig load(Path configDir) {
@@ -29,11 +23,10 @@ public final class ClientConfig {
             } catch (IOException ignored) {
             }
         } else {
-            // Do not alter connections to arbitrary servers before capability
-            // negotiation exists; users opt in through an explicit whitelist.
+            // Compression remains opt-in globally; every enabled server is
+            // checked by the capability probe before the pipeline is installed.
             props.setProperty("enabled", "false");
             props.setProperty("compression-level", "6");
-            props.setProperty("servers", "");
             try {
                 Files.createDirectories(configDir);
                 try (var out = Files.newOutputStream(path)) {
@@ -43,26 +36,15 @@ public final class ClientConfig {
             }
         }
 
-        var servers = Arrays.stream(props.getProperty("servers", "").split(","))
-            .map(String::trim)
-            .filter(s -> !s.isEmpty())
-            .map(s -> s.toLowerCase(Locale.ROOT))
-            .collect(Collectors.toUnmodifiableSet());
-
         var level = parseInt(props.getProperty("compression-level"));
-        return new ClientConfig(Boolean.parseBoolean(props.getProperty("enabled", "false")), level, servers);
+        return new ClientConfig(Boolean.parseBoolean(props.getProperty("enabled", "false")), level);
     }
 
     public boolean enabledFor(String host, int port) {
-        if (!enabled || host == null || host.isBlank()) {
-            return false;
-        }
-        if (servers.contains("*")) {
-            return true;
-        }
-        var normalizedHost = host.toLowerCase(Locale.ROOT);
-        return servers.contains(normalizedHost) || servers.contains(normalizedHost + ":" + port);
+        return enabled && host != null && !host.isBlank();
     }
+
+    public boolean enabled() { return enabled; }
 
     public int compressionLevel() {
         return compressionLevel;

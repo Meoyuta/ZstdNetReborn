@@ -14,7 +14,7 @@ Run `bash ./build.sh` from this directory. The script builds the server-client m
 
 The artifact is copied to `target/ZstdNet-1.21.1-neoforge-server-client-<version>.jar` by the build script. Install the same mod build on the server and every participating client. Keep the mod versions synchronized; older wire-protocol versions are intentionally unsupported.
 
-The newly generated client configuration is disabled by default (`enabled=false`) and has an empty server whitelist. Enable it and add each ZstdNet server explicitly under `servers`; ordinary servers are not capability-probed automatically and LAN/integrated-server hosting is not supported. If the server is stopped or the address is not configured correctly, the client does not silently fall back to the ordinary protocol.
+The newly generated client configuration is disabled by default (`enabled=false`). When enabled, every server is checked with the ZstdNet capability probe before compression is installed; there is no server whitelist or probe bypass. Ordinary servers stay on the plain protocol when probing fails. LAN/integrated-server hosting is not supported.
 
 ## Features
 

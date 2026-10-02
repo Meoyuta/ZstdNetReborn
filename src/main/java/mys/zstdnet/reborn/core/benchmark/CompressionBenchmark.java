@@ -296,10 +296,22 @@ public final class CompressionBenchmark implements AutoCloseable {
     static Result selectBestCandidate(List<Result> candidates) {
         var fastestLatency = candidates.stream().mapToDouble(Result::estimatedMillis).min().orElseThrow();
         var latencyBudget = Math.min(LATENCY_BUDGET_MILLIS, fastestLatency * RELATIVE_LATENCY_BUDGET);
+        var fastestCodec = candidates.stream().mapToDouble(Result::codecMillis).min().orElseThrow();
+        var fastestCompression = candidates.stream().mapToDouble(Result::compressionPercent).min().orElseThrow();
         return candidates.stream()
                 .filter(candidate -> candidate.estimatedMillis() <= fastestLatency + latencyBudget)
-                .min((left, right) -> Double.compare(left.compressionPercent(), right.compressionPercent()))
+                .min((left, right) -> Double.compare(score(left, fastestCodec, fastestCompression),
+                        score(right, fastestCodec, fastestCompression)))
                 .orElseThrow();
+    }
+
+    private static double score(Result candidate, double fastestCodec, double fastestCompression) {
+        double compressionPenalty = fastestCompression <= 0.0D
+                ? candidate.compressionPercent() : candidate.compressionPercent() / fastestCompression;
+        double codecPenalty = fastestCodec <= 0.0D
+                ? candidate.codecMillis() : candidate.codecMillis() / fastestCodec;
+        // Compression remains primary, but a slower level must pay a measurable cost.
+        return compressionPenalty * 0.70D + codecPenalty * 0.30D;
     }
 
     public synchronized void setTemporaryLevel(int level) {

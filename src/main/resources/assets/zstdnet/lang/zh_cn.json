@@ -69,6 +69,7 @@
   "zstdnet.screen.status.benchmark_runs": "Benchmark 运行次数：%s",
   "zstdnet.screen.status.dictionary": "字典：%s",
   "zstdnet.screen.status.dictionary_connections": "字典连接数：%s",
+  "zstdnet.screen.status.dictionary_fallbacks": "字典降级（累计／当前）：%s",
   "zstdnet.screen.dictionary_status.title": "ZstdNet 字典状态",
   "zstdnet.screen.dictionary_status.mode": "视图：%s",
   "zstdnet.screen.dictionary_status.status": "状态",

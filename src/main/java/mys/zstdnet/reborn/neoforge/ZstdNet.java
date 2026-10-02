@@ -298,7 +298,9 @@ public final class ZstdNet {
                 stats.wireUpBytes(), stats.rawUpBytes(), stats.wireDownBytes(), stats.rawDownBytes(),
                 stats.wireUpRate(), stats.rawUpRate(), stats.wireDownRate(), stats.rawDownRate(),
                 stats.ratioPercent(), stats.connections(), compressionLevel.get(), dictionary,
-                dictionaryConnections(), selectedDictionaryConnections(), latency,
+                dictionaryConnections(), selectedDictionaryConnections(),
+                injector == null ? 0 : injector.dictionaryFallbacks(),
+                injector == null ? 0 : injector.activeDictionaryFallbacks(), latency,
                 runtimeSeconds(), benchmarkRunCount.get())));
     }
 
@@ -516,6 +518,7 @@ public final class ZstdNet {
             out.write("dictionary_connections=" + dictionaryConnections() + "\n");
             out.write("selected_dictionary_connections=" + selectedDictionaryConnections() + "\n");
             out.write("dictionary_uplink_fallbacks=" + (injector == null ? 0 : injector.dictionaryFallbacks()) + "\n");
+            out.write("dictionary_active_fallback_connections=" + (injector == null ? 0 : injector.activeDictionaryFallbacks()) + "\n");
             out.write("benchmark_state=" + result.state() + "\n");
             out.write("benchmark_level=" + result.level() + "\n");
             out.write("benchmark_samples=" + result.samples() + "\n");

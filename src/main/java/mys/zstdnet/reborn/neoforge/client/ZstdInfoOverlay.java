@@ -97,7 +97,8 @@ public final class ZstdInfoOverlay {
         y = line(g, y, "latency", number(p.latencyMillis(), " ms", "%.2f"), "status");
         y = line(g, y, "runtime", data(formatDuration(p.uptimeSeconds())), "status");
         y = line(g, y, "benchmark_runs", data(Integer.toString(p.benchmarkRuns())), "status");
-        line(g, y, "dictionary", data(p.dictionary()), "status");
+        y = line(g, y, "dictionary", data(p.dictionary()), "status");
+        line(g, y, "dictionary_fallbacks", data(p.dictionaryFallbacks() + " / " + p.activeDictionaryFallbacks()), "status");
     }
 
     private static void renderBenchmark(GuiGraphics g, BenchmarkInfoPayload p) {
