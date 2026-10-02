@@ -20,8 +20,29 @@ class ZstdNettyPipelineTest {
     void compressionQueueEnforcesPacketAndByteLimits() {
         assertTrue(ZstdNettyEncoder.queueWithinLimits(127, 0, 1));
         assertFalse(ZstdNettyEncoder.queueWithinLimits(128, 0, 1));
-        assertFalse(ZstdNettyEncoder.queueWithinLimits(0, 32L * 1024 * 1024, 1));
+        assertTrue(ZstdNettyEncoder.queueWithinLimits(255, 0, 1, ZstdNettyEncoder.joinQueueLimits()));
+        assertFalse(ZstdNettyEncoder.queueWithinLimits(256, 0, 1, ZstdNettyEncoder.joinQueueLimits()));
+        assertFalse(ZstdNettyEncoder.queueWithinLimits(0, 256L * 1024 * 1024, 1,
+            ZstdNettyEncoder.joinQueueLimits()));
         assertTrue(ZstdNettyEncoder.queueWithinLimits(0, 0, 0));
+        assertTrue(ZstdNettyEncoder.isJoinBurstWindow(0L));
+        assertFalse(ZstdNettyEncoder.isJoinBurstWindow(java.util.concurrent.TimeUnit.SECONDS.toNanos(60)));
+    }
+
+    @Test
+    void compressionQueueOverflowDoesNotCloseTcpChannel() {
+        var channel = new EmbeddedChannel(new ZstdNettyEncoder(
+            () -> 3, false, ZstdFrameStats.NONE, null,
+            new ZstdNettyEncoder.QueueLimits(1, 64),
+            new ZstdNettyEncoder.QueueLimits(1, 64)));
+        var oversized = Unpooled.buffer(65).writerIndex(65);
+        try {
+            assertThrows(IllegalStateException.class, () -> channel.writeOutbound(oversized));
+            assertTrue(channel.isOpen(), "a rejected compression packet must not close TCP");
+            assertTrue(channel.isActive(), "a rejected compression packet must leave TCP active");
+        } finally {
+            channel.finishAndReleaseAll();
+        }
     }
 
     @Test
