@@ -216,7 +216,8 @@ public final class ZstdDictionarySession {
                         pendingAcknowledgementType = DIRECTIONAL_REJECT;
                         acknowledgementPending = true;
                     }
-                    downloadListener.failed("client dictionary id does not match server inbound dictionary; continuing without uplink dictionary");
+                    downloadListener.failed(ZstdDictionaryDownloadListener.DictionaryFailure.INBOUND_ID_MISMATCH,
+                        "client dictionary id does not match server inbound dictionary; continuing without uplink dictionary");
                     return;
                 }
                 dictionary = expectedInbound;
@@ -232,7 +233,7 @@ public final class ZstdDictionarySession {
             }
             downloadListener.completed(id);
         } catch (IOException e) {
-            downloadListener.failed(e.getMessage());
+            downloadListener.failed(ZstdDictionaryDownloadListener.DictionaryFailure.INVALID, e.getMessage());
             throw e;
         }
     }
@@ -254,7 +255,8 @@ public final class ZstdDictionarySession {
                     throw new IOException("invalid ZstdNet dictionary rejection");
                 }
                 activeOutbound = null;
-                downloadListener.failed("server rejected uplink dictionary; continuing without uplink dictionary");
+                downloadListener.failed(ZstdDictionaryDownloadListener.DictionaryFailure.OFFER_REJECTED,
+                    "server rejected uplink dictionary; continuing without uplink dictionary");
                 return;
             }
             if (id != outboundOffer.id()) throw new IOException("ZstdNet dictionary acknowledgement does not match offer");
@@ -312,7 +314,7 @@ public final class ZstdDictionarySession {
 
     public void disconnected() {
         if (role == Role.CLIENT && announcedDownload && activeInbound == null) {
-            downloadListener.failed("Dictionary download interrupted");
+            downloadListener.failed(ZstdDictionaryDownloadListener.DictionaryFailure.IO, "Dictionary download interrupted");
         }
     }
 

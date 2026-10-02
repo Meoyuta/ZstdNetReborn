@@ -495,6 +495,10 @@ public final class ZstdNet {
             out.write("generated_at=" + Instant.now() + "\n");
             out.write("requester=" + (requesterName == null ? "unknown" : requesterName) + "\n");
             out.write("zstdnet_running=" + isRunning() + "\n");
+            out.write("inject_state=" + SamePortZstdInjector.lastState() + "\n");
+            if (SamePortZstdInjector.lastError() != null) {
+                out.write("inject_error=" + SamePortZstdInjector.lastError() + "\n");
+            }
             out.write("runtime_seconds=" + runtimeSeconds() + "\n");
             out.write("benchmark_runs=" + benchmarkRunCount() + "\n");
             out.write("compression_level=" + compressionLevel() + "\n");
@@ -511,6 +515,7 @@ public final class ZstdNet {
             out.write("compression_ratio_percent=" + String.format(Locale.ROOT, "%.4f", stats.ratioPercent()) + "\n");
             out.write("dictionary_connections=" + dictionaryConnections() + "\n");
             out.write("selected_dictionary_connections=" + selectedDictionaryConnections() + "\n");
+            out.write("dictionary_uplink_fallbacks=" + (injector == null ? 0 : injector.dictionaryFallbacks()) + "\n");
             out.write("benchmark_state=" + result.state() + "\n");
             out.write("benchmark_level=" + result.level() + "\n");
             out.write("benchmark_samples=" + result.samples() + "\n");

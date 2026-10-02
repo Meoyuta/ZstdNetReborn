@@ -9,6 +9,7 @@ import java.util.Arrays;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ZstdFrameCodecOptimizationTest {
     @Test
@@ -33,6 +34,21 @@ class ZstdFrameCodecOptimizationTest {
         } finally {
             frame.release();
             decoded.release();
+        }
+    }
+
+    @Test
+    void rejectsOversizedDeclaredRawLengthBeforeAllocation() {
+        var frame = Unpooled.buffer();
+        var output = Unpooled.buffer();
+        try {
+            ZstdFrameCodec.writeVarInt(frame, ZstdFrameCodec.MAX_FRAME_BYTES + 1);
+            ZstdFrameCodec.writeVarInt(frame, 1);
+            assertThrows(java.io.IOException.class,
+                () -> ZstdFrameCodec.readFrame(frame, null, output));
+        } finally {
+            frame.release();
+            output.release();
         }
     }
 

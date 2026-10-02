@@ -127,6 +127,12 @@ public final class ZstdDictionaryTrainer implements AutoCloseable {
         }
     }
 
+    public boolean isActive() {
+        synchronized (lock) {
+            return !closed && !shuttingDown && session != null && !session.finalizing;
+        }
+    }
+
     public void abort() {
         synchronized (lock) {
             if (session != null) {

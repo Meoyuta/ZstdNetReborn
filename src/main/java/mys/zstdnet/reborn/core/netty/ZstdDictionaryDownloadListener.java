@@ -1,6 +1,7 @@
 package mys.zstdnet.reborn.core.netty;
 
 public interface ZstdDictionaryDownloadListener {
+    enum DictionaryFailure { INBOUND_ID_MISMATCH, OFFER_REJECTED, INVALID, IO }
     ZstdDictionaryDownloadListener NONE = new ZstdDictionaryDownloadListener() {
         @Override
         public void started(long dictionaryId, int dictionaryBytes) {
@@ -26,4 +27,8 @@ public interface ZstdDictionaryDownloadListener {
     void completed(long dictionaryId);
 
     void failed(String message);
+
+    default void failed(DictionaryFailure reason, String detail) {
+        failed(detail);
+    }
 }

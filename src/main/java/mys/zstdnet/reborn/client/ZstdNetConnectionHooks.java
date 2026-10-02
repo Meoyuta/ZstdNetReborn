@@ -16,13 +16,14 @@ import java.util.Map;
 public final class ZstdNetConnectionHooks {
     private static final long PENDING_CONNECT_TTL_MS = 15_000L;
     private static final Map<String, ConcurrentLinkedQueue<PendingConnection>> PENDING = new ConcurrentHashMap<>();
+    private static final int MAX_PENDING_PER_KEY = 8;
 
     private ZstdNetConnectionHooks() {
     }
 
     public static boolean prepare(String host, int port) {
+        expireStale();
         if (host == null || host.isBlank()) {
-            PENDING.clear();
             ZstdNetClient.logger().debug("prepare skipped: blank host");
             return false;
         }
@@ -40,7 +41,9 @@ public final class ZstdNetConnectionHooks {
             config.compressionLevel(),
             System.currentTimeMillis() + PENDING_CONNECT_TTL_MS
         );
-        PENDING.computeIfAbsent(key(host, port), ignored -> new ConcurrentLinkedQueue<>()).add(pending);
+        var queue = PENDING.computeIfAbsent(key(host, port), ignored -> new ConcurrentLinkedQueue<>());
+        while (queue.size() >= MAX_PENDING_PER_KEY) queue.poll();
+        queue.add(pending);
         ZstdNetClient.logger().info("prepared ZstdNet pipeline for " + host + ":" + port);
         return true;
     }
@@ -116,6 +119,13 @@ public final class ZstdNetConnectionHooks {
         }
         PENDING.remove(key(host, port), queue);
         return null;
+    }
+
+    private static void expireStale() {
+        PENDING.entrySet().removeIf(entry -> {
+            entry.getValue().removeIf(PendingConnection::expired);
+            return entry.getValue().isEmpty();
+        });
     }
 
     private record PendingConnection(String host, int port, int compressionLevel, long expiresAtMs) {

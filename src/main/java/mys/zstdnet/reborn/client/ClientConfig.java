@@ -32,7 +32,7 @@ public final class ClientConfig {
             // Do not alter connections to arbitrary servers before capability
             // negotiation exists; users opt in through an explicit whitelist.
             props.setProperty("enabled", "false");
-            props.setProperty("compression-level", "9");
+            props.setProperty("compression-level", "6");
             props.setProperty("servers", "");
             try {
                 Files.createDirectories(configDir);
@@ -72,7 +72,7 @@ public final class ClientConfig {
         try {
             return Integer.parseInt(raw);
         } catch (NumberFormatException e) {
-            return 9;
+            return 6;
         }
     }
 }

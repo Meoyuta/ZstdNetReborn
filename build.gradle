@@ -59,6 +59,8 @@ sourceSets.main.resources {
 }
 
 dependencies {
+    // core codecs use the SLF4J API directly; NeoForge supplies the binding at runtime.
+    api 'org.slf4j:slf4j-api:2.0.9'
     jarJar(implementation("com.github.luben:zstd-jni:${project.zstd_jni_version}")) {
         version {
             strictly project.zstd_jni_version

@@ -7,6 +7,7 @@ import io.netty.channel.ChannelPromise;
 import mys.zstdnet.reborn.core.protocol.ZstdPersistentStreamCodec;
 import java.nio.channels.ClosedChannelException;
 import java.util.function.IntSupplier;
+import mys.zstdnet.reborn.core.stats.CompressionMetrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -23,6 +24,7 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     private int persistentLevel = Integer.MIN_VALUE;
     private boolean ownsPersistentStream = true;
     private boolean closed;
+    private final CompressionMetrics metrics = new CompressionMetrics();
 
     public ZstdNettyEncoder(int level, boolean sendMagic, ZstdFrameStats stats) {
         this(() -> level, sendMagic, stats, null);
@@ -53,6 +55,10 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
 
     boolean isIdleForMove() {
         return true;
+    }
+
+    public CompressionMetrics metrics() {
+        return metrics;
     }
 
     @Override
@@ -96,6 +102,7 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     }
 
     private void encode(io.netty.channel.ChannelHandlerContext ctx, ByteBuf msg, ByteBuf out) throws Exception {
+        long started = System.nanoTime();
         var readable = msg.readableBytes();
         if (readable <= 0 && (dictionarySession == null || !dictionarySession.hasPendingControl())) {
             return;
@@ -131,7 +138,7 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
         var dictionaryId = dictionary == null ? 0L : dictionary.id();
         var currentLevel = Math.clamp(level.getAsInt(), 1, 22);
         if (persistentStream == null || persistentDictionaryId != dictionaryId || persistentLevel != currentLevel) {
-            if (persistentStream != null && dictionarySession != null) {
+            if (persistentStream != null) {
                 var before = out.writerIndex();
                 ZstdDictionarySession.writeStreamResetControl(out);
                 wireBytes += out.writerIndex() - before;
@@ -156,6 +163,7 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
         }
         stats.outbound(rawLength, wireBytes);
         stats.outboundSample(msg);
+        metrics.recordSync(rawLength, 1, System.nanoTime() - started);
     }
 
     @Override

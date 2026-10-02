@@ -100,7 +100,7 @@ public final class ZstdNettyDecoder extends ByteToMessageDecoder {
             }
 
             if (storedTag == 0) {
-                var raw = ctx.alloc().buffer(rawLength, rawLength);
+                var raw = ctx.alloc().buffer(Math.min(rawLength, 64 * 1024), rawLength);
                 try {
                     raw.writeBytes(in, rawLength);
                 } catch (Throwable error) {
@@ -126,10 +126,10 @@ public final class ZstdNettyDecoder extends ByteToMessageDecoder {
             var dictionaryId = streamDictionary == null ? 0L : streamDictionary.id();
             if (persistentStream == null || persistentDictionaryId != dictionaryId) {
                 if (persistentStream != null) persistentStream.close();
-                persistentStream = new ZstdPersistentStreamCodec(3, streamDictionary);
+                persistentStream = new ZstdPersistentStreamCodec(ZstdPersistentStreamCodec.DECODE_LEVEL, streamDictionary);
                 persistentDictionaryId = dictionaryId;
             }
-            var raw = ctx.alloc().buffer(rawLength, rawLength);
+            var raw = ctx.alloc().buffer(Math.min(rawLength, 64 * 1024), rawLength);
             try {
                 persistentStream.decompress(payload, rawLength, raw);
             } catch (Exception error) {

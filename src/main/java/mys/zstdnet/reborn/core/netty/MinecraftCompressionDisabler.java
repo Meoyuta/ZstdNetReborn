@@ -49,7 +49,10 @@ public final class MinecraftCompressionDisabler extends ChannelDuplexHandler {
     }
 
     private static boolean isCompressionPacket(Object msg) {
-        return msg != null && "ClientboundLoginCompressionPacket".equals(msg.getClass().getSimpleName());
+        if (msg == null) return false;
+        var name = msg.getClass().getName();
+        return name.startsWith("net.minecraft.network.protocol.login.")
+            && name.endsWith("ClientboundLoginCompressionPacket");
     }
 
     private static void removeCompressionHandlers(ChannelPipeline pipeline) {

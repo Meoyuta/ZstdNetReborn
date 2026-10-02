@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
+import net.minecraft.network.protocol.login.ClientboundLoginCompressionPacket;
 
 class ZstdNettyPipelineTest {
     @Test
@@ -258,6 +259,4 @@ class ZstdNettyPipelineTest {
         return result;
     }
 
-    private static final class ClientboundLoginCompressionPacket {
-    }
 }

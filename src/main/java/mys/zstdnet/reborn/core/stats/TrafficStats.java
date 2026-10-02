@@ -31,6 +31,7 @@ public final class TrafficStats {
     private final AtomicLong wireUp = new AtomicLong();
     private final AtomicLong wireDown = new AtomicLong();
     private final AtomicInteger dictionaryFallbacks = new AtomicInteger();
+    private final AtomicInteger activeDictionaryFallbacks = new AtomicInteger();
 
     public void addDictionaryFallback() {
         dictionaryFallbacks.incrementAndGet();
@@ -38,6 +39,14 @@ public final class TrafficStats {
 
     public int dictionaryFallbacks() {
         return dictionaryFallbacks.get();
+    }
+
+    public void addActiveDictionaryFallback(int delta) {
+        activeDictionaryFallbacks.updateAndGet(value -> Math.max(0, value + delta));
+    }
+
+    public int activeDictionaryFallbacks() {
+        return activeDictionaryFallbacks.get();
     }
 
     private volatile long sampleAtMs = System.currentTimeMillis();

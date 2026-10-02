@@ -12,6 +12,7 @@ import io.netty.buffer.Unpooled;
 
 /** Stateful v2 stream codec. A flush preserves the zstd window between records. */
 public final class ZstdPersistentStreamCodec implements AutoCloseable {
+    public static final int DECODE_LEVEL = 3;
     /**
      * Captures only the bytes emitted by the current flush. Keeping the full
      * compressed history here makes every packet copy the entire connection

@@ -171,6 +171,10 @@ public final class CompressionBenchmark implements AutoCloseable {
         return request(false);
     }
 
+    public boolean isActive() {
+        return running.get();
+    }
+
     public void setCompletionListener(Consumer<Result> listener) {
         completionListener = listener == null ? ignored -> {} : listener;
     }

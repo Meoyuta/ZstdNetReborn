@@ -25,9 +25,16 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntSupplier;
 
 final class SamePortZstdHandler extends ByteToMessageDecoder {
+    private static final int MAX_CONNECTIONS_PER_IP = 3;
+    private static final int MAX_HANDSHAKES_PER_MINUTE = 10;
+    private static final long HANDSHAKE_TIMEOUT_MILLIS = 10_000L;
+    private static final ConcurrentHashMap<String, AtomicInteger> ACTIVE_BY_IP = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, Window> HANDSHAKES_BY_IP = new ConcurrentHashMap<>();
     private enum Mode {
         UNDECIDED,
         RAW,
@@ -43,6 +50,8 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
     private final IntSupplier compressionLevel;
     private Mode mode = Mode.UNDECIDED;
     private boolean streamHeaderRead;
+    private boolean admitted;
+    private String remoteIp;
 
     SamePortZstdHandler(
         ZstdNetConfig config,
@@ -63,6 +72,17 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
     }
 
     @Override
+    public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
+        super.handlerAdded(ctx);
+        ctx.executor().schedule(() -> {
+            if (mode == Mode.UNDECIDED && ctx.channel().isActive()) {
+                logger.warn("closing incomplete ZstdNet handshake from " + ctx.channel().remoteAddress());
+                ctx.close();
+            }
+        }, HANDSHAKE_TIMEOUT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
+    @Override
     protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
         logger.debug("protocol decode remote=" + ctx.channel().remoteAddress() + " mode=" + mode
             + " readable=" + in.readableBytes());
@@ -79,6 +99,7 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
             return;
         }
         if (startsWithMagic(in)) {
+            if (!admit(ctx)) return;
             in.skipBytes(ZstdFrameCodec.MAGIC.length);
             mode = Mode.ZSTD;
             logger.debug("protocol mode ZSTD remote=" + ctx.channel().remoteAddress());
@@ -135,8 +156,15 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
                         }
                     }
                     public void failed(String message) {
-                        if (message != null && message.contains("continuing without uplink dictionary")) {
+                        logger.warn(message);
+                    }
+                    public void failed(mys.zstdnet.reborn.core.netty.ZstdDictionaryDownloadListener.DictionaryFailure reason,
+                                       String message) {
+                        if (reason == mys.zstdnet.reborn.core.netty.ZstdDictionaryDownloadListener.DictionaryFailure.INBOUND_ID_MISMATCH
+                            || reason == mys.zstdnet.reborn.core.netty.ZstdDictionaryDownloadListener.DictionaryFailure.OFFER_REJECTED) {
                             stats.addDictionaryFallback();
+                            stats.addActiveDictionaryFallback(1);
+                            ctx.channel().closeFuture().addListener(ignored -> stats.addActiveDictionaryFallback(-1));
                         }
                         logger.warn(message);
                     }
@@ -175,7 +203,52 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
             if (active.compareAndSet(true, false)) {
                 stats.addConnection(-1);
             }
+            if (admitted && remoteIp != null) {
+                ACTIVE_BY_IP.computeIfPresent(remoteIp, (key, count) -> count.decrementAndGet() <= 0 ? null : count);
+                admitted = false;
+            }
         });
+    }
+
+    private boolean admit(ChannelHandlerContext ctx) {
+        var address = ctx.channel().remoteAddress();
+        var ip = address instanceof java.net.InetSocketAddress socket
+            ? socket.getAddress().getHostAddress() : String.valueOf(address);
+        var now = System.currentTimeMillis();
+        var window = HANDSHAKES_BY_IP.computeIfAbsent(ip, ignored -> new Window(now));
+        synchronized (window) {
+            if (now - window.startedAt > 60_000L) {
+                window.startedAt = now;
+                window.count = 0;
+            }
+            if (++window.count > MAX_HANDSHAKES_PER_MINUTE) {
+                logger.warn("rate-limited ZstdNet handshake from " + ip);
+                ctx.close();
+                return false;
+            }
+        }
+        var active = ACTIVE_BY_IP.computeIfAbsent(ip, ignored -> new AtomicInteger());
+        if (active.incrementAndGet() > MAX_CONNECTIONS_PER_IP) {
+            active.decrementAndGet();
+            logger.warn("connection limit reached for ZstdNet client " + ip);
+            ctx.close();
+            return false;
+        }
+        remoteIp = ip;
+        admitted = true;
+        ctx.channel().closeFuture().addListener(future -> {
+            if (admitted && remoteIp != null) {
+                ACTIVE_BY_IP.computeIfPresent(remoteIp, (key, count) -> count.decrementAndGet() <= 0 ? null : count);
+                admitted = false;
+            }
+        });
+        return true;
+    }
+
+    private static final class Window {
+        long startedAt;
+        int count;
+        Window(long startedAt) { this.startedAt = startedAt; }
     }
 
     ZstdFrameStats serverStats() {
@@ -196,13 +269,13 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
 
             @Override
             public void inboundSample(ByteBuf raw) {
-                dictionaryTrainer.capture(true, raw);
+                if (dictionaryTrainer.isActive()) dictionaryTrainer.capture(true, raw);
                 benchmark.capture(raw);
             }
 
             @Override
             public void outboundSample(ByteBuf raw) {
-                dictionaryTrainer.capture(false, raw);
+                if (dictionaryTrainer.isActive()) dictionaryTrainer.capture(false, raw);
                 benchmark.capture(raw);
             }
         };

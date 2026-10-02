@@ -22,6 +22,9 @@ import java.util.Objects;
 import java.util.function.IntSupplier;
 
 public final class SamePortZstdInjector implements AutoCloseable {
+    public enum InjectState { OK, NO_CHANNELS, EXCEPTION }
+    private static volatile InjectState lastState = InjectState.OK;
+    private static volatile Throwable lastError;
     private static final String ACCEPT_HANDLER = "zstdnet-accept-injector";
     private static final String CONNECTION_HANDLER = "zstdnet-same-port-codec";
     // Resolve once and read directly from a static final exact handle, following:
@@ -63,6 +66,7 @@ public final class SamePortZstdInjector implements AutoCloseable {
     public void inject() {
         List<Channel> serverChannels = serverChannels();
         if (serverChannels.isEmpty()) {
+            lastState = InjectState.NO_CHANNELS;
             throw new IllegalStateException("could not find Minecraft server Netty channels");
         }
 
@@ -76,9 +80,13 @@ public final class SamePortZstdInjector implements AutoCloseable {
                 injectedServerChannels.add(channel);
             }
         } catch (RuntimeException e) {
+            lastState = InjectState.EXCEPTION;
+            lastError = e;
             close();
             throw e;
         }
+        lastState = InjectState.OK;
+        lastError = null;
         logger.info("ZstdNet same-port injection active on " + serverChannels.size() + " server channel(s)");
     }
 
@@ -88,6 +96,11 @@ public final class SamePortZstdInjector implements AutoCloseable {
 
     public int dictionaryConnections() { return stats.dictionaryConnections(); }
     public int dictionaryConnections(long id) { return stats.dictionaryConnections(id); }
+    public int dictionaryFallbacks() { return stats.dictionaryFallbacks(); }
+    public int activeDictionaryFallbacks() { return stats.activeDictionaryFallbacks(); }
+
+    public static InjectState lastState() { return lastState; }
+    public static Throwable lastError() { return lastError; }
 
     @Override
     public void close() {
