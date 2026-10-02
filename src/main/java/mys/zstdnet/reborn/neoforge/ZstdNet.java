@@ -365,6 +365,7 @@ public final class ZstdNet {
     synchronized void refreshMeasuredLatencies(MinecraftServer server) {
         if (server.getTickCount() - lastLatencyProbeTick < 20) return;
         lastLatencyProbeTick = server.getTickCount();
+        if (infoOverlays.isEmpty()) return;
         var now = System.nanoTime();
         for (var entry : debugProbes.entrySet()) {
             var probe = entry.getValue();
@@ -384,11 +385,14 @@ public final class ZstdNet {
     }
 
     private void broadcastMeasuredLatency(java.util.UUID playerId, double millis) {
+        if (infoOverlays.isEmpty()) return;
         var packet = new net.minecraft.network.protocol.common.ClientboundCustomPayloadPacket(
                 new MeasuredLatencyPayload(playerId, millis));
         if (injector == null || injector.server() == null) return;
         for (var viewer : injector.server().getPlayerList().getPlayers()) {
-            if (viewer.connection.isAcceptingMessages()) viewer.connection.send(packet);
+            if (infoOverlays.containsKey(viewer.getUUID()) && viewer.connection.isAcceptingMessages()) {
+                viewer.connection.send(packet);
+            }
         }
     }
 
@@ -471,6 +475,10 @@ public final class ZstdNet {
     }
 
     public synchronized Path writeDebugReport(net.minecraft.server.level.ServerPlayer requester) throws IOException {
+        return writeDebugReport(requester == null ? "unknown" : requester.getGameProfile().getName());
+    }
+
+    public synchronized Path writeDebugReport(String requesterName) throws IOException {
         Path directory = FMLPaths.CONFIGDIR.get().resolve("debug");
         Files.createDirectories(directory);
         String timestamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss.SSS", Locale.ROOT)
@@ -485,7 +493,7 @@ public final class ZstdNet {
         try (BufferedWriter out = Files.newBufferedWriter(report, StandardCharsets.UTF_8)) {
             out.write("ZstdNet diagnostic snapshot\n");
             out.write("generated_at=" + Instant.now() + "\n");
-            out.write("requester=" + requester.getGameProfile().getName() + "\n");
+            out.write("requester=" + (requesterName == null ? "unknown" : requesterName) + "\n");
             out.write("zstdnet_running=" + isRunning() + "\n");
             out.write("runtime_seconds=" + runtimeSeconds() + "\n");
             out.write("benchmark_runs=" + benchmarkRunCount() + "\n");

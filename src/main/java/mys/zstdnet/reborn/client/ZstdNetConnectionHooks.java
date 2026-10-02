@@ -8,25 +8,28 @@ import io.netty.channel.ChannelPipeline;
 import io.netty.channel.socket.DatagramChannel;
 
 import java.util.Locale;
-import java.util.concurrent.atomic.AtomicReference;
+import java.net.InetSocketAddress;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.Map;
 
 public final class ZstdNetConnectionHooks {
     private static final long PENDING_CONNECT_TTL_MS = 15_000L;
-    private static final AtomicReference<PendingConnection> PENDING = new AtomicReference<>();
+    private static final Map<String, ConcurrentLinkedQueue<PendingConnection>> PENDING = new ConcurrentHashMap<>();
 
     private ZstdNetConnectionHooks() {
     }
 
     public static boolean prepare(String host, int port) {
         if (host == null || host.isBlank()) {
-            PENDING.set(null);
+            PENDING.clear();
             ZstdNetClient.logger().debug("prepare skipped: blank host");
             return false;
         }
 
         var config = ZstdNetClient.config();
         if (!config.enabledFor(host, port)) {
-            PENDING.set(null);
+            PENDING.remove(key(host, port));
             ZstdNetClient.logger().debug("prepare skipped: disabled for " + host + ":" + port);
             return false;
         }
@@ -37,7 +40,7 @@ public final class ZstdNetConnectionHooks {
             config.compressionLevel(),
             System.currentTimeMillis() + PENDING_CONNECT_TTL_MS
         );
-        PENDING.set(pending);
+        PENDING.computeIfAbsent(key(host, port), ignored -> new ConcurrentLinkedQueue<>()).add(pending);
         ZstdNetClient.logger().info("prepared ZstdNet pipeline for " + host + ":" + port);
         return true;
     }
@@ -55,8 +58,13 @@ public final class ZstdNetConnectionHooks {
                 + pipeline.names());
             return;
         }
-        var pending = PENDING.getAndSet(null);
-        if (pending == null || pending.expired()) {
+        var remote = pipeline.channel().remoteAddress();
+        if (!(remote instanceof InetSocketAddress address)) {
+            ZstdNetClient.logger().debug("install skipped: TCP remote address unavailable");
+            return;
+        }
+        var pending = pollPending(address.getHostString(), address.getPort());
+        if (pending == null) {
             ZstdNetClient.logger().debug("install skipped: no live pending TCP connection");
             return;
         }
@@ -93,6 +101,21 @@ public final class ZstdNetConnectionHooks {
 
     private static boolean isDatagramPipeline(ChannelPipeline pipeline) {
         return pipeline == null || pipeline.channel() instanceof DatagramChannel;
+    }
+
+    private static String key(String host, int port) {
+        return host.toLowerCase(Locale.ROOT) + ":" + port;
+    }
+
+    private static PendingConnection pollPending(String host, int port) {
+        var queue = PENDING.get(key(host, port));
+        if (queue == null) return null;
+        PendingConnection pending;
+        while ((pending = queue.poll()) != null) {
+            if (!pending.expired()) return pending;
+        }
+        PENDING.remove(key(host, port), queue);
+        return null;
     }
 
     private record PendingConnection(String host, int port, int compressionLevel, long expiresAtMs) {

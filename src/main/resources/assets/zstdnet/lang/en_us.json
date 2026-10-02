@@ -38,6 +38,7 @@
   "zstdnet.command.dictionary.unknown_name": "unknown",
   "zstdnet.command.ping": "Network round-trip time: %s ms",
   "zstdnet.command.ping.direct": "Measured network round-trip time: %s ms",
+  "zstdnet.command.ping.player_only": "Direct ping requires an in-game player source.",
   "zstdnet.command.debug.state": "ZstdNet active: %s",
   "zstdnet.command.debug.connections": "Connections: active %s, total since startup %s",
   "zstdnet.command.debug.compression": "Compression: level %s, compressed/raw ratio %s%%",

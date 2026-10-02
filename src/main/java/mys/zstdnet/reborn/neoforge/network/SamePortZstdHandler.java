@@ -134,7 +134,12 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
                                 + ", id=" + Long.toUnsignedString(id));
                         }
                     }
-                    public void failed(String message) { logger.warn(message); }
+                    public void failed(String message) {
+                        if (message != null && message.contains("continuing without uplink dictionary")) {
+                            stats.addDictionaryFallback();
+                        }
+                        logger.warn(message);
+                    }
                 });
             ZstdNettyPipeline.install(
                 ctx.pipeline(),

@@ -30,6 +30,15 @@ public final class TrafficStats {
     private final AtomicLong rawDown = new AtomicLong();
     private final AtomicLong wireUp = new AtomicLong();
     private final AtomicLong wireDown = new AtomicLong();
+    private final AtomicInteger dictionaryFallbacks = new AtomicInteger();
+
+    public void addDictionaryFallback() {
+        dictionaryFallbacks.incrementAndGet();
+    }
+
+    public int dictionaryFallbacks() {
+        return dictionaryFallbacks.get();
+    }
 
     private volatile long sampleAtMs = System.currentTimeMillis();
     private volatile long sampledRawUp;

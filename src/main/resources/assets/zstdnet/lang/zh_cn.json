@@ -38,6 +38,7 @@
   "zstdnet.command.dictionary.unknown_name": "未知名称",
   "zstdnet.command.ping": "网络往返时间：%s 毫秒",
   "zstdnet.command.ping.direct": "实测网络往返时间：%s 毫秒",
+  "zstdnet.command.ping.player_only": "直接 ping 需要由游戏内玩家执行。",
   "zstdnet.command.debug.state": "ZstdNet 运行状态：%s",
   "zstdnet.command.debug.connections": "连接数：当前有效 %s，启动以来累计 %s",
   "zstdnet.command.debug.compression": "压缩：等级 %s，压缩后/原始数据比例 %s%%",

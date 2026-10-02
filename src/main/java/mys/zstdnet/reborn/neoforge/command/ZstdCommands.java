@@ -6,7 +6,6 @@ import mys.zstdnet.reborn.neoforge.ZstdNet;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
-import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import mys.zstdnet.reborn.core.dictionary.ZstdDictionaryStore;
 import mys.zstdnet.reborn.core.dictionary.ZstdDictionaryTrainer;
 import net.minecraft.ChatFormatting;
@@ -275,17 +274,18 @@ public final class ZstdCommands {
         }
     }
 
-    private int ping(CommandSourceStack source) throws CommandSyntaxException {
-        var player = source.getPlayerOrException();
+    private int ping(CommandSourceStack source) {
+        if (!(source.getEntity() instanceof ServerPlayer player)) {
+            return fail(source, "ping.player_only");
+        }
         mod.measureDirectLatency(player, millis -> player.sendSystemMessage(
                 text("ping.direct", String.format(Locale.ROOT, "%.2f", millis))));
         return 1;
     }
 
-    private int debug(CommandSourceStack source) throws CommandSyntaxException {
-        var player = source.getPlayerOrException();
+    private int debug(CommandSourceStack source) {
         try {
-            var report = mod.writeDebugReport(player);
+            var report = mod.writeDebugReport(source.getTextName());
             source.sendSuccess(() -> text("debug.file", report.toString()), false);
             return 1;
         } catch (IOException error) {

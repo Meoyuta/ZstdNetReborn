@@ -21,9 +21,8 @@ abstract class PlayerTabOverlayMixin {
         }
         var profileId = MeasuredLatencyClientState.profileId(profile);
         var measured = profileId == null ? Double.NaN : MeasuredLatencyClientState.get(profileId);
-        var text = Double.isFinite(measured)
-                ? String.format(java.util.Locale.ROOT, "%.2fms", measured)
-                : "--";
+        if (!Double.isFinite(measured)) return;
+        var text = String.format(java.util.Locale.ROOT, "%.2fms", measured);
         cir.setReturnValue(cir.getReturnValue().copy().append(
                 Component.literal(" [" + text + "]").withStyle(ChatFormatting.GRAY)));
     }

@@ -14,6 +14,8 @@ ZstdNet 为 Minecraft 1.21.1 的网络连接增加 Zstandard 压缩；客户端�
 
 构建脚本会将 1.21.1 产物复制为 `target/ZstdNet-1.21.1-neoforge-server-client-<version>.jar`。服务端及所有参与连接的客户端应安装相同构建版本。协议不兼容旧模组版本，请保持客户端与服务端版本同步。
 
+新生成的客户端配置默认关闭（enabled=false），服务器白名单为空。请启用配置并在 servers 中明确填写每个 ZstdNet 服务器；当前不会自动探测普通服务器能力，也不支持 LAN/集成服务器。服务器停用或地址配置错误时，客户端不会静默回退到普通协议。
+
 ## 功能
 
 - 同端口 Zstandard 协议检测与 Netty 压缩。

@@ -172,13 +172,11 @@ public final class ZstdNettyPipeline {
     private static final class ControlHandler extends ChannelDuplexHandler {
         @Override
         public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
-            reposition(ctx.pipeline());
             super.channelRead(ctx, msg);
         }
 
         @Override
         public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
-            reposition(ctx.pipeline());
             super.write(ctx, msg, promise);
         }
     }

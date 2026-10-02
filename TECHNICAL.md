@@ -8,7 +8,7 @@
 
 ## 连接与协议
 
-客户端从 `config/zstdnet-client.properties` 读取连接选择配置。新生成配置默认禁用并使用空服务器列表，必须显式启用且配置服务器白名单后才会安装 ZstdNet，避免对未安装模组的任意服务器发送压缩流。共享 Netty codec 安装在入站 AES 解密后、packet splitter 前，以及出站 AES 加密前、packet framing 后。服务端通过 Zstandard frame magic 与协议版本检测连接，匹配后安装 ZstdNet pipeline 并避免原版压缩协商。原版 status ping 透传；未安装/不匹配的连接按配置返回拒绝信息。当前尚未实现普通服务器能力探测后的自动降级。
+客户端从 `config/zstdnet-client.properties` 读取连接选择配置。新生成配置默认禁用并使用空服务器列表，必须显式启用且配置服务器白名单后才会安装 ZstdNet，避免对未安装模组的任意服务器发送压缩流。当前没有普通服务器能力探测后的自动降级，也不支持 LAN/集成服务器；白名单地址或服务端状态不匹配时不会静默回退到普通协议。共享 Netty codec 安装在入站 AES 解密后、packet splitter 前，以及出站 AES 加密前、packet framing 后。服务端通过 Zstandard frame magic 与协议版本检测连接，匹配后安装 ZstdNet pipeline 并避免原版压缩协商。原版 status ping 透传；未安装/不匹配的连接按配置返回拒绝信息。
 
 协议 v2 使用双向持久 zstd 流，每个数据帧仍显式保留原始长度和压缩块长度。`storedTag == 0` 的小帧按原始字节直通；压缩帧由持久流解压。压缩等级或字典变化时重置相应流上下文，连接关闭时释放上下文。协议版本不同步时不提供旧协议兼容；解码器遇到压缩流无进展会立即以连接错误结束，不能在 event loop 上无限等待。
 
@@ -38,7 +38,7 @@ Sable 的激活令牌通过 Minecraft TCP 自定义 payload 传送，UDP 认证�
 
 F8 打开 overlay 选择界面，可选 benchmark、管理状态和字典状态；只有通过 F8 菜单关闭 overlay，离开世界时会清除状态且不持久化。界面数据约每秒更新一次，不阻塞玩家移动和交互。管理状态包括压缩等级、当前 RTT、服务器视角的每秒上/下行（原始与线路字节）、运行时长和进程内 benchmark 次数。
 
-`/zstdnet ping` 使用 nonce 请求/响应及 `System.nanoTime()` 测量 RTT，不复用 Minecraft 延迟值。`/zstdnet debug` 无额外权限要求，在 `config/debug/` 写入一次性 UTF-8 诊断报告，包含连接、流量/压缩、benchmark、字典、服务端 tick、JVM 与玩家 RTT 拆分信息，不进行逐包持续磁盘记录。
+`/zstdnet ping` 使用 nonce 请求/响应及 `System.nanoTime()` 测量 RTT，不复用 Minecraft 延迟值；该命令需要玩家来源以便返回结果。`/zstdnet debug` 无额外权限要求，玩家、控制台、命令方块和其他 `CommandSourceStack` 均可执行，在 `config/debug/` 写入一次性 UTF-8 诊断报告，报告中的 requester 使用命令源文本名称，包含连接、流量/压缩、benchmark、字典、服务端 tick、JVM 与玩家 RTT 拆分信息，不进行逐包持续磁盘记录。
 
 `/zstdnet debug` 可由玩家、服务端控制台、命令方块和其他 `CommandSourceStack` 执行；报告中的 `requester` 使用命令源文本名称，不再要求存在玩家实体。日志诊断中若 `server_tick_max_ms` 达到数秒，应优先按服务端主线程停顿处理，而不是把 Tab 延迟直接归因于 ZstdNet 网络压缩；Netty 压缩线程栈与服务端 tick 栈需分别判断。
 
