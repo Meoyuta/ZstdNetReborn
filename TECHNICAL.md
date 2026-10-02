@@ -12,7 +12,7 @@
 
 协议 v2 使用双向持久 zstd 流，每个数据帧仍显式保留原始长度和压缩块长度。压缩等级或字典变化时重置相应流上下文，连接关闭时释放上下文。协议版本不同步时不提供旧协议兼容。
 
-编码器不再运行 one-shot 帧压缩。每连接持有持久压缩/解压上下文；Netty ByteBuf 直接作为输入，压缩与解压输出使用引用计数 ByteBuf，样本采集最多复制 4 KiB。连接安装后的前 60 秒加入突发窗口最多排队 512 个包/256 MiB RAW，之后回落到 128 个包/32 MiB RAW；全局 worker 队列最多 512 项。超过当前阶段上限时释放并丢弃当前写入、将其 promise 标记成功以避免 Minecraft 将有意丢包当作连接异常，并记录丢弃包的数量和 RAW 字节数；编码器不主动关闭 TCP。连接重排只在编码队列空闲时执行。
+编码器使用 Netty event loop 同步压缩，不再有每连接待压缩队列或全局 worker 队列。持久 zstd 流建立在连续 TCP 字节流之上，不能丢弃任意写入；同步压缩保持每个写入的字节都进入同一压缩流，并让 event loop 的阻塞形成生产者反压。Netty ByteBuf 直接作为输入，压缩输出使用引用计数 ByteBuf，样本采集最多复制 4 KiB。代价是压缩期间 event loop 会被占用，可能造成服务端 tick/网络处理卡顿，应通过实服加入突发验证其性能。
 
 ## Sable 独立 UDP 兼容
 
@@ -44,7 +44,7 @@ F8 打开 overlay 选择界面，可选 benchmark、管理状态和字典状态�
 
 连接诊断还会在 ZstdNet TCP pipeline 中安装 `zstdnet-diagnostics`。该 handler 不修改消息，仅记录 channel short id、remote、active/open 状态、最后一个入站/出站消息类型、pipeline、`close-request`、`disconnect-request`、`deregister-request`、`close-complete`、`channelInactive` 和 `exceptionCaught`；异常会保留完整 cause 到 FINE 日志。独立 `DatagramChannel` 在安装前被排除，因此不会安装该 handler、ZstdNet 编解码器或控制 handler。
 
-异步编码器的队列溢出是连接中断排查中的关键事件：旧实现会在失败当前 promise 后调用 `ctx.close()`，导致客户端只看到通用“连接中断”。现实现仅在连接安装后的 60 秒加入突发窗口临时放宽上限，超限包会释放、丢弃、成功完成 promise 并以 WARNING 记录丢弃行为，不发起 TCP 关闭；TCP diagnostics 的 close/inactive 日志可区分队列丢弃与真正的远端/其他 handler 关闭。
+历史异步编码器曾在队列溢出时关闭连接，随后改成丢包成功虽避免 promise 异常，却会破坏连续 zstd 流并令客户端 packet decoder 失步。当前改回 event loop 同步压缩，彻底移除队列上限和丢包路径，以阻塞发送生产者来保持字节流完整；需要监测其对 event loop 延迟和服务端 tick 的影响。
 
 ## 构建与验证
 
