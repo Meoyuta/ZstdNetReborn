@@ -12,12 +12,14 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.IntSupplier;
-import java.util.logging.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public final class ZstdNettyEncoder extends ChannelDuplexHandler {
-    private static final Logger LOGGER = Logger.getLogger("ZstdNet");
-    private static final int MAX_PENDING_PACKETS = 128;
-    private static final long MAX_PENDING_BYTES = 32L * 1024 * 1024;
+    private static final Logger LOGGER = LoggerFactory.getLogger("ZstdNet");
+    private static final QueueLimits NORMAL_QUEUE_LIMITS = new QueueLimits(128, 32L * 1024 * 1024);
+    private static final QueueLimits JOIN_QUEUE_LIMITS = new QueueLimits(256, 256L * 1024 * 1024);
+    private static final long JOIN_BURST_WINDOW_NANOS = TimeUnit.SECONDS.toNanos(60);
     private static final int WORKER_COUNT = Math.max(2, Runtime.getRuntime().availableProcessors() / 2);
     private static final ThreadPoolExecutor COMPRESSORS = new ThreadPoolExecutor(
         WORKER_COUNT, WORKER_COUNT, 30L, TimeUnit.SECONDS, new ArrayBlockingQueue<>(512), task -> {
@@ -30,6 +32,9 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     private final boolean sendMagic;
     private final ZstdFrameStats stats;
     private final ZstdDictionarySession dictionarySession;
+    private final QueueLimits normalQueueLimits;
+    private final QueueLimits joinQueueLimits;
+    private long queueWindowStartedNanos;
     private boolean magicSent;
     private boolean streamHeaderSent;
     private ZstdPersistentStreamCodec persistentStream;
@@ -54,14 +59,24 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
 
     public ZstdNettyEncoder(IntSupplier level, boolean sendMagic, ZstdFrameStats stats,
                             ZstdDictionarySession dictionarySession) {
+        this(level, sendMagic, stats, dictionarySession, NORMAL_QUEUE_LIMITS, JOIN_QUEUE_LIMITS);
+    }
+
+    ZstdNettyEncoder(IntSupplier level, boolean sendMagic, ZstdFrameStats stats,
+                     ZstdDictionarySession dictionarySession, QueueLimits normalQueueLimits,
+                     QueueLimits joinQueueLimits) {
         this.level = level;
         this.sendMagic = sendMagic;
         this.stats = stats == null ? ZstdFrameStats.NONE : stats;
         this.dictionarySession = dictionarySession;
+        this.normalQueueLimits = normalQueueLimits;
+        this.joinQueueLimits = joinQueueLimits;
+        this.queueWindowStartedNanos = System.nanoTime();
     }
 
     ZstdNettyEncoder copyForMove() {
         var copy = new ZstdNettyEncoder(level, sendMagic, stats, dictionarySession);
+        copy.queueWindowStartedNanos = queueWindowStartedNanos;
         copy.magicSent = magicSent;
         copy.streamHeaderSent = streamHeaderSent;
         copy.persistentStream = persistentStream;
@@ -82,18 +97,24 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
             return;
         }
         if (closed || !ctx.channel().isActive()) {
-            LOGGER.fine("encoder write rejected: closed=" + closed + " active=" + ctx.channel().isActive());
+            LOGGER.debug("encoder write rejected: closed={} active={}", closed, ctx.channel().isActive());
             msg.release();
             promise.tryFailure(new ClosedChannelException());
             return;
         }
         int bytes = msg.readableBytes();
-        if (!queueWithinLimits(pendingWrites.size(), pendingBytes, bytes)) {
-            LOGGER.fine("encoder queue limit: packets=" + pendingWrites.size()
-                + " bytes=" + pendingBytes + " newBytes=" + bytes);
+        boolean joinBurst = isJoinBurstWindow(System.nanoTime() - queueWindowStartedNanos);
+        QueueLimits limits = joinBurst ? joinQueueLimits : normalQueueLimits;
+        if (!queueWithinLimits(pendingWrites.size(), pendingBytes, bytes, limits)) {
+            LOGGER.warn("dropping outbound packet because compression queue limit was exceeded; "
+                    + "TCP channel remains open: channel={} remote={} phase={} droppedPackets=1 "
+                    + "droppedRawBytes={} packets={} queuedRawBytes={} packetLimit={} rawByteLimit={} "
+                    + "compressionActive={} pipeline={}",
+                ctx.channel().id().asShortText(), ctx.channel().remoteAddress(),
+                joinBurst ? "join-burst" : "normal", bytes, pendingWrites.size(), pendingBytes,
+                limits.maxPackets(), limits.maxBytes(), compressionActive, ctx.pipeline().names());
             msg.release();
             promise.tryFailure(new IllegalStateException("ZstdNet compression queue limit exceeded"));
-            ctx.close();
             return;
         }
         pendingWrites.addLast(new PendingWrite(msg, promise, bytes));
@@ -102,8 +123,24 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     }
 
     static boolean queueWithinLimits(int packetCount, long queuedBytes, int newMessageBytes) {
-        return packetCount < MAX_PENDING_PACKETS && newMessageBytes >= 0
-            && queuedBytes + newMessageBytes <= MAX_PENDING_BYTES;
+        return queueWithinLimits(packetCount, queuedBytes, newMessageBytes, NORMAL_QUEUE_LIMITS);
+    }
+
+    static boolean queueWithinLimits(int packetCount, long queuedBytes, int newMessageBytes, QueueLimits limits) {
+        return packetCount < limits.maxPackets() && newMessageBytes >= 0
+            && queuedBytes + newMessageBytes <= limits.maxBytes();
+    }
+
+    static boolean isJoinBurstWindow(long elapsedNanos) {
+        return elapsedNanos >= 0L && elapsedNanos < JOIN_BURST_WINDOW_NANOS;
+    }
+
+    static QueueLimits normalQueueLimits() {
+        return NORMAL_QUEUE_LIMITS;
+    }
+
+    static QueueLimits joinQueueLimits() {
+        return JOIN_QUEUE_LIMITS;
     }
 
     private void drainCompressionQueue(io.netty.channel.ChannelHandlerContext ctx) {
@@ -185,8 +222,8 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
 
     @Override
     public void channelInactive(io.netty.channel.ChannelHandlerContext ctx) throws Exception {
-        LOGGER.fine("encoder channelInactive pending=" + pendingWrites.size()
-            + " pendingBytes=" + pendingBytes + " activeWrite=" + (activeWrite != null));
+        LOGGER.debug("encoder channelInactive pending={} pendingBytes={} activeWrite={}",
+            pendingWrites.size(), pendingBytes, activeWrite != null);
         closed = true;
         failPendingWrites();
         if (compressionActive) closeWhenIdle = true;
@@ -302,4 +339,6 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     }
 
     private record PendingWrite(ByteBuf message, ChannelPromise promise, int bytes) {}
+
+    record QueueLimits(int maxPackets, long maxBytes) {}
 }
