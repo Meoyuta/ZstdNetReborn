@@ -33,6 +33,7 @@ public final class ZstdDictionarySession {
     private boolean inboundOfferSent;
     private long pendingAcknowledgement;
     private int pendingAcknowledgementDirection = -1;
+    private boolean acknowledgementPending;
     private boolean announcedDownload;
     private boolean inboundStreamReset;
 
@@ -115,11 +116,12 @@ public final class ZstdDictionarySession {
             // The server does not send the client dictionary; it only accepts and ACKs it.
             inboundOfferSent = true;
         }
-        if (pendingAcknowledgement != 0L) {
+        if (acknowledgementPending) {
             long id = pendingAcknowledgement;
             int direction = pendingAcknowledgementDirection;
             pendingAcknowledgement = 0L;
             pendingAcknowledgementDirection = -1;
+            acknowledgementPending = false;
             var payloadLength = directional ? 10 : 9;
             writeVarInt(out, 0);
             writeVarInt(out, payloadLength << 1);
@@ -203,7 +205,13 @@ public final class ZstdDictionarySession {
                 dictionary = receiver.receive(id, bytes);
             } else {
                 if (expectedInbound == null || expectedInbound.id() != id) {
-                    throw new IOException("client dictionary id does not match server inbound dictionary");
+                    synchronized (this) {
+                        pendingAcknowledgement = 0L;
+                        pendingAcknowledgementDirection = direction;
+                        acknowledgementPending = true;
+                    }
+                    downloadListener.failed("client dictionary id does not match server inbound dictionary; continuing without uplink dictionary");
+                    return;
                 }
                 dictionary = expectedInbound;
             }
@@ -213,6 +221,7 @@ public final class ZstdDictionarySession {
                 if (!directionalRecord) activeOutbound = dictionary;
                 pendingAcknowledgement = dictionary.id();
                 pendingAcknowledgementDirection = direction;
+                acknowledgementPending = true;
             }
             downloadListener.completed(id);
         } catch (IOException e) {
@@ -233,6 +242,11 @@ public final class ZstdDictionarySession {
             int expectedDirection = role == Role.SERVER ? SERVER_TO_CLIENT : CLIENT_TO_SERVER;
             if (direction != expectedDirection) throw new IOException("unexpected dictionary acknowledgement direction");
             long id = in.readLong();
+            if (directionalRecord && role == Role.CLIENT && id == 0L) {
+                activeOutbound = null;
+                downloadListener.failed("server rejected uplink dictionary; continuing without uplink dictionary");
+                return;
+            }
             if (id != outboundOffer.id()) throw new IOException("ZstdNet dictionary acknowledgement does not match offer");
             activeOutbound = outboundOffer;
             if (!directionalRecord) activeInbound = outboundOffer;
@@ -261,7 +275,7 @@ public final class ZstdDictionarySession {
     }
 
     public synchronized boolean hasPendingControl() {
-        return outboundOffer != null && !offerSent || pendingAcknowledgement != 0L;
+        return outboundOffer != null && !offerSent || acknowledgementPending;
     }
 
     public static void writeStreamResetControl(ByteBuf out) {

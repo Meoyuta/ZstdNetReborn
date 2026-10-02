@@ -76,7 +76,7 @@ dependencies {
 
 // Unit tests exercise the Java Netty pipeline only. Native transport artifacts are
 // platform-specific and are supplied by the NeoForge runtime when a game is run.
-configurations.configureEach {
+configurations.matching { it.name in ['testCompileClasspath', 'testRuntimeClasspath'] }.configureEach {
     exclude group: 'io.netty', module: 'netty-transport-native-epoll'
     exclude group: 'io.netty', module: 'netty-transport-native-kqueue'
     exclude group: 'io.netty', module: 'netty-resolver-dns-native-macos'

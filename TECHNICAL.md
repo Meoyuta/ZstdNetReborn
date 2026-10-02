@@ -8,9 +8,9 @@
 
 ## 连接与协议
 
-客户端从 `config/zstdnet-client.properties` 读取连接选择配置。共享 Netty codec 安装在入站 AES 解密后、packet splitter 前，以及出站 AES 加密前、packet framing 后。服务端通过 Zstandard frame magic 与协议版本检测连接，匹配后安装 ZstdNet pipeline 并避免原版压缩协商。原版 status ping 透传；未安装/不匹配的连接按配置返回拒绝信息。
+客户端从 `config/zstdnet-client.properties` 读取连接选择配置。新生成配置默认禁用并使用空服务器列表，必须显式启用且配置服务器白名单后才会安装 ZstdNet，避免对未安装模组的任意服务器发送压缩流。共享 Netty codec 安装在入站 AES 解密后、packet splitter 前，以及出站 AES 加密前、packet framing 后。服务端通过 Zstandard frame magic 与协议版本检测连接，匹配后安装 ZstdNet pipeline 并避免原版压缩协商。原版 status ping 透传；未安装/不匹配的连接按配置返回拒绝信息。当前尚未实现普通服务器能力探测后的自动降级。
 
-协议 v2 使用双向持久 zstd 流，每个数据帧仍显式保留原始长度和压缩块长度。压缩等级或字典变化时重置相应流上下文，连接关闭时释放上下文。协议版本不同步时不提供旧协议兼容。
+协议 v2 使用双向持久 zstd 流，每个数据帧仍显式保留原始长度和压缩块长度。`storedTag == 0` 的小帧按原始字节直通；压缩帧由持久流解压。压缩等级或字典变化时重置相应流上下文，连接关闭时释放上下文。协议版本不同步时不提供旧协议兼容；解码器遇到压缩流无进展会立即以连接错误结束，不能在 event loop 上无限等待。
 
 编码器使用 Netty event loop 同步压缩，不再有每连接待压缩队列或全局 worker 队列。持久 zstd 流建立在连续 TCP 字节流之上，不能丢弃任意写入；同步压缩保持每个写入的字节都进入同一压缩流，并让 event loop 的阻塞形成生产者反压。Netty ByteBuf 直接作为输入，压缩输出使用引用计数 ByteBuf，样本采集最多复制 4 KiB。代价是压缩期间 event loop 会被占用，可能造成服务端 tick/网络处理卡顿，应通过实服加入突发验证其性能。
 
@@ -32,7 +32,7 @@ Sable 的激活令牌通过 Minecraft TCP 自定义 payload 传送，UDP 认证�
 
 ## 字典
 
-字典以单个 ZIP bundle 保存，包含 `uplink.zdict`（最多 64 KiB）和 `downlink.zdict`（最多 128 KiB）。训练分别收集两个方向的样本并独立训练。bundle、选择状态和待命名字典存放在 `config/zstdnet/dict/`；客户端校验服务端字典 ID 后缓存并确认，之后才启用对应方向的字典压缩。旧的单字典格式不兼容。
+字典以单个 ZIP bundle 保存，包含 `uplink.zdict`（最多 64 KiB）和 `downlink.zdict`（最多 128 KiB）。训练分别收集两个方向的样本并独立训练。bundle、选择状态和待命名字典存放在 `config/zstdnet/dict/`；客户端校验服务端字典 ID 后缓存并确认，之后才启用对应方向的字典压缩。服务端发现客户端 uplink ID 不匹配时发送拒绝确认，双方该方向继续使用无字典流，避免旧客户端永久断线；当前协议仍没有服务端主动下发新 uplink 的路径。旧的单字典格式不兼容。
 
 ## 状态与诊断
 
@@ -44,7 +44,7 @@ F8 打开 overlay 选择界面，可选 benchmark、管理状态和字典状态�
 
 连接诊断还会在 ZstdNet TCP pipeline 中安装 `zstdnet-diagnostics`。该 handler 不修改消息，仅记录 channel short id、remote、active/open 状态、最后一个入站/出站消息类型、pipeline、`close-request`、`disconnect-request`、`deregister-request`、`close-complete`、`channelInactive` 和 `exceptionCaught`；异常会保留完整 cause 到 FINE 日志。独立 `DatagramChannel` 在安装前被排除，因此不会安装该 handler、ZstdNet 编解码器或控制 handler。
 
-历史异步编码器曾在队列溢出时关闭连接，随后改成丢包成功虽避免 promise 异常，却会破坏连续 zstd 流并令客户端 packet decoder 失步。当前改回 event loop 同步压缩，彻底移除队列上限和丢包路径，以阻塞发送生产者来保持字节流完整；需要监测其对 event loop 延迟和服务端 tick 的影响。
+历史异步编码器曾在队列溢出时关闭连接，随后改成丢包成功虽避免 promise 异常，却会破坏连续 zstd 流并令客户端 packet decoder 失步。当前改回 event loop 同步压缩，彻底移除队列上限和丢包路径，以阻塞发送生产者来保持字节流完整；需要监测其对 event loop 延迟和服务端 tick 的影响。停服字典训练最多等待 30 秒，超时后丢弃未发布结果并记录 warning。
 
 ## 构建与验证
 

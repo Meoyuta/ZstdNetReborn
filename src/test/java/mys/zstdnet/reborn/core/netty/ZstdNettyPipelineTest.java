@@ -130,6 +130,31 @@ class ZstdNettyPipelineTest {
     }
 
     @Test
+    void decodesUncompressedSmallFrame() throws Exception {
+        var raw = new byte[]{1, 2, 3, 4, 5};
+        var frame = Unpooled.buffer();
+        try (var codec = new mys.zstdnet.reborn.core.protocol.ZstdPersistentStreamCodec(3, null)) {
+            ZstdFrameCodec.writeFrame(Unpooled.wrappedBuffer(raw), codec, false, frame);
+        }
+        var decoder = new EmbeddedChannel(new ZstdNettyDecoder(ZstdFrameStats.NONE));
+        try {
+            assertTrue(decoder.writeInbound(frame.retain()));
+            ByteBuf decoded = decoder.readInbound();
+            try {
+                assertNotNull(decoded);
+                var actual = new byte[decoded.readableBytes()];
+                decoded.readBytes(actual);
+                assertArrayEquals(raw, actual);
+            } finally {
+                if (decoded != null) decoded.release();
+            }
+        } finally {
+            frame.release();
+            decoder.finishAndReleaseAll();
+        }
+    }
+
+    @Test
     void encoderReadsCompressionLevelForEachExistingConnectionWrite() throws Exception {
         var level = new AtomicInteger(1);
         var calls = new AtomicInteger();
@@ -227,7 +252,7 @@ class ZstdNettyPipelineTest {
         while ((result = channel.readOutbound()) == null && System.nanoTime() < deadline) {
             channel.runPendingTasks();
             channel.runScheduledPendingTasks();
-            Thread.sleep(1);
+            Thread.yield();
         }
         assertNotNull(result, "asynchronous compressed output did not arrive");
         return result;

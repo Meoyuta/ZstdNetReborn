@@ -97,6 +97,20 @@ class ZstdPersistentStreamCodecTest {
         }
     }
 
+    @Test
+    void rejectsTruncatedPayloadInsteadOfWaitingForever() throws Exception {
+        try (var decoder = new ZstdPersistentStreamCodec(3, null)) {
+            var payload = Unpooled.wrappedBuffer(new byte[]{1, 2, 3});
+            var decoded = Unpooled.buffer();
+            try {
+                assertThrows(java.io.IOException.class, () -> decoder.decompress(payload, 4096, decoded));
+            } finally {
+                payload.release();
+                decoded.release();
+            }
+        }
+    }
+
     private static void assertBufEquals(byte[] expected, ByteBuf actual) {
         assertEquals(expected.length, actual.readableBytes());
         var bytes = new byte[expected.length];

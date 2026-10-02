@@ -173,7 +173,7 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
         });
     }
 
-    private ZstdFrameStats serverStats() {
+    ZstdFrameStats serverStats() {
         return new ZstdFrameStats() {
             @Override
             public void inbound(long rawBytes, long wireBytes) {
@@ -190,13 +190,13 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
             }
 
             @Override
-            public void inboundSample(byte[] raw) {
+            public void inboundSample(ByteBuf raw) {
                 dictionaryTrainer.capture(true, raw);
                 benchmark.capture(raw);
             }
 
             @Override
-            public void outboundSample(byte[] raw) {
+            public void outboundSample(ByteBuf raw) {
                 dictionaryTrainer.capture(false, raw);
                 benchmark.capture(raw);
             }

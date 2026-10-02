@@ -80,7 +80,7 @@ public final class ZstdPersistentStreamCodec implements AutoCloseable {
         while (remaining > 0) {
             int count = decoder.read(transfer, 0, Math.min(remaining, transfer.length));
             if (count < 0) throw new IOException("persistent stream ended before packet boundary");
-            if (count == 0) continue;
+            if (count == 0) throw new IOException("persistent stream made no progress before packet boundary");
             out.writeBytes(transfer, 0, count);
             remaining -= count;
         }

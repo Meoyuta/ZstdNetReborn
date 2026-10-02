@@ -13,6 +13,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 public final class ZstdDictionaryTrainer implements AutoCloseable {
+    private static final long SHUTDOWN_TIMEOUT_MILLIS = 30_000L;
     public static final Duration DEFAULT_DURATION = Duration.ofMinutes(10);
     public static final int UPLINK_DICTIONARY_BYTES = 64 * 1024;
     public static final int DOWNLINK_DICTIONARY_BYTES = 128 * 1024;
@@ -114,6 +115,7 @@ public final class ZstdDictionaryTrainer implements AutoCloseable {
             if (uplink) session.uplinkBytes += length;
             else session.downlinkBytes += length;
             session.totalBytes += length;
+            if (session.totalBytes >= SAMPLE_BYTES * 2) stopAndFinalize();
         }
     }
 
@@ -161,15 +163,26 @@ public final class ZstdDictionaryTrainer implements AutoCloseable {
             executor.shutdown();
         }
         boolean interrupted = false;
-        for (;;) {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(SHUTDOWN_TIMEOUT_MILLIS);
+        boolean terminated = false;
+        while (!terminated) {
             try {
-                if (executor.awaitTermination(5, TimeUnit.SECONDS)) break;
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0L) break;
+                terminated = executor.awaitTermination(Math.min(TimeUnit.NANOSECONDS.toMillis(remaining), 5_000L), TimeUnit.MILLISECONDS);
+                if (terminated) break;
                 logger.debug("Dictionary shutdown: training or saving is still in progress...");
             } catch (InterruptedException e) {
                 interrupted = true;
+                break;
             }
         }
         synchronized (lock) {
+            if (!terminated) {
+                executor.shutdownNow();
+                result = "shutdown timeout";
+                logger.warn("Dictionary shutdown timed out after " + SHUTDOWN_TIMEOUT_MILLIS + " ms; training result will be discarded");
+            }
             closed = true;
             logger.debug("Dictionary shutdown complete: " + result);
         }
