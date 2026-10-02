@@ -18,7 +18,7 @@ import org.slf4j.LoggerFactory;
 public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     private static final Logger LOGGER = LoggerFactory.getLogger("ZstdNet");
     private static final QueueLimits NORMAL_QUEUE_LIMITS = new QueueLimits(128, 32L * 1024 * 1024);
-    private static final QueueLimits JOIN_QUEUE_LIMITS = new QueueLimits(256, 256L * 1024 * 1024);
+    private static final QueueLimits JOIN_QUEUE_LIMITS = new QueueLimits(512, 256L * 1024 * 1024);
     private static final long JOIN_BURST_WINDOW_NANOS = TimeUnit.SECONDS.toNanos(60);
     private static final int WORKER_COUNT = Math.max(2, Runtime.getRuntime().availableProcessors() / 2);
     private static final ThreadPoolExecutor COMPRESSORS = new ThreadPoolExecutor(
@@ -48,6 +48,10 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     private boolean closed;
     private boolean retryScheduled;
     private PendingWrite activeWrite;
+    private long activeWriteStartedNanos;
+    private long droppedPacketsSinceWarning;
+    private long droppedBytesSinceWarning;
+    private long lastDropWarningNanos;
 
     public ZstdNettyEncoder(int level, boolean sendMagic, ZstdFrameStats stats) {
         this(() -> level, sendMagic, stats, null);
@@ -105,16 +109,11 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
         int bytes = msg.readableBytes();
         boolean joinBurst = isJoinBurstWindow(System.nanoTime() - queueWindowStartedNanos);
         QueueLimits limits = joinBurst ? joinQueueLimits : normalQueueLimits;
-        if (!queueWithinLimits(pendingWrites.size(), pendingBytes, bytes, limits)) {
-            LOGGER.warn("dropping outbound packet because compression queue limit was exceeded; "
-                    + "TCP channel remains open: channel={} remote={} phase={} droppedPackets=1 "
-                    + "droppedRawBytes={} packets={} queuedRawBytes={} packetLimit={} rawByteLimit={} "
-                    + "compressionActive={} pipeline={}",
-                ctx.channel().id().asShortText(), ctx.channel().remoteAddress(),
-                joinBurst ? "join-burst" : "normal", bytes, pendingWrites.size(), pendingBytes,
-                limits.maxPackets(), limits.maxBytes(), compressionActive, ctx.pipeline().names());
+        int queuedPackets = pendingWrites.size() + (activeWrite == null ? 0 : 1);
+        if (!queueWithinLimits(queuedPackets, pendingBytes, bytes, limits)) {
+            logDroppedPackets(ctx, joinBurst, limits, bytes, queuedPackets);
             msg.release();
-            promise.tryFailure(new IllegalStateException("ZstdNet compression queue limit exceeded"));
+            promise.trySuccess();
             return;
         }
         pendingWrites.addLast(new PendingWrite(msg, promise, bytes));
@@ -147,6 +146,7 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
         if (compressionActive || pendingWrites.isEmpty() || !ctx.channel().isActive()) return;
         PendingWrite pending = pendingWrites.removeFirst();
         activeWrite = pending;
+        activeWriteStartedNanos = System.nanoTime();
         compressionActive = true;
         try {
             COMPRESSORS.execute(() -> {
@@ -189,6 +189,7 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
         pending.message().release();
         pendingBytes -= pending.bytes();
         activeWrite = null;
+        activeWriteStartedNanos = 0L;
         compressionActive = false;
         if (closed || !ctx.channel().isActive()) {
             encoded.release();
@@ -209,6 +210,28 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
         }
         if (closeWhenIdle) closePersistentStreamQuietly();
         drainCompressionQueue(ctx);
+    }
+
+    private void logDroppedPackets(io.netty.channel.ChannelHandlerContext ctx, boolean joinBurst,
+                                   QueueLimits limits, int incomingBytes, int queuedPackets) {
+        long now = System.nanoTime();
+        droppedPacketsSinceWarning++;
+        droppedBytesSinceWarning += incomingBytes;
+        if (lastDropWarningNanos != 0L && now - lastDropWarningNanos < TimeUnit.SECONDS.toNanos(1)) return;
+
+        LOGGER.warn("dropping outbound packet(s) because compression queue limit was exceeded; "
+                + "TCP channel remains open and dropped write promises succeed: channel={} remote={} "
+                + "phase={} droppedPackets={} droppedRawBytes={} packets={} queuedRawBytes={} "
+                + "packetLimit={} rawByteLimit={} compressionActive={} activeWriteAgeMs={} "
+                + "channelWritable={} pipeline={}",
+            ctx.channel().id().asShortText(), ctx.channel().remoteAddress(),
+            joinBurst ? "join-burst" : "normal", droppedPacketsSinceWarning, droppedBytesSinceWarning,
+            queuedPackets, pendingBytes, limits.maxPackets(), limits.maxBytes(), compressionActive,
+            activeWriteStartedNanos == 0L ? 0L : TimeUnit.NANOSECONDS.toMillis(now - activeWriteStartedNanos),
+            ctx.channel().isWritable(), ctx.pipeline().names());
+        droppedPacketsSinceWarning = 0L;
+        droppedBytesSinceWarning = 0L;
+        lastDropWarningNanos = now;
     }
 
     private void scheduleRetry(io.netty.channel.ChannelHandlerContext ctx) {
