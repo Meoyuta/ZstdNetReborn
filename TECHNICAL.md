@@ -2,9 +2,9 @@
 
 ## 工程范围
 
-本仓库是 Minecraft 1.21.1 / NeoForge 21.1.223 的双端独立工程，使用 Java 21。根 Gradle 工程仅包含 `core`、`mod-common` 和 `neoforge` 三个子工程；NeoForge 源集使用 `neoforge/src/client` 与 `neoforge/src/1_21_1`。目标版本参数集中在根目录 `gradle.properties`。
+本仓库是 Minecraft 1.21.1 / NeoForge 21.1.223 的双端独立工程，使用 Java 21。项目采用 NeoForge MDK/ModDev Gradle 的单一根工程，源码只使用标准 `src/main` 与 `src/test` 源集。目标版本参数集中在根目录 `gradle.properties`。
 
-`core` 提供帧协议、Netty 编解码器、流量统计、压缩 benchmark、字典存储/训练/同步；`mod-common` 提供共享客户端配置、连接选择和字典缓存；`neoforge` 提供 1.21.1 双端入口、同端口注入、命令、payload、screen 与 overlay。
+`mys.zstdnet.reborn.core` 提供帧协议、Netty 编解码器、流量统计、压缩 benchmark、字典存储/训练/同步；`mys.zstdnet.reborn.client` 提供客户端配置、连接选择和字典缓存；`mys.zstdnet.reborn.neoforge` 按入口、`client`、`network`、`command`、`mixin` 分包，提供 NeoForge 双端入口、同端口注入、命令、payload、screen 与 overlay。所有代码属于同一根工程，不再通过 Gradle 子项目互相依赖。
 
 ## 连接与协议
 
@@ -12,9 +12,23 @@
 
 协议 v2 使用双向持久 zstd 流，每个数据帧仍显式保留原始长度和压缩块长度。压缩等级或字典变化时重置相应流上下文，连接关闭时释放上下文。协议版本不同步时不提供旧协议兼容。
 
+编码器不再运行 one-shot 帧压缩。每连接持有持久压缩/解压上下文；Netty ByteBuf 直接作为输入，压缩与解压输出使用引用计数 ByteBuf，样本采集最多复制 4 KiB。压缩任务通过固定大小的全局 worker 池运行，每连接串行提交以保持 TCP 包顺序。每连接最多排队 128 个包/32 MiB，全局 worker 队列最多 512 项；超过上限时失败并关闭连接，避免无界积压。连接重排只在编码队列空闲时执行。
+
+## Sable 独立 UDP 兼容
+
+Sable (`modId = sable`) 在 NeoForge 元数据中声明为 optional 软依赖，版本范围从 2.0.5 起；未安装 Sable 不影响 ZstdNet 加载。ZstdNet 不静态链接 Sable API。服务端同端口注入器采用两层排除：已知规则跳过带有 Sable UDP decoder 的本地 UDP channel；通用规则只接受 Netty `ServerChannel`，并拒绝 `DatagramChannel`，因此独立 UDP 监听器不会进入 TCP 接受注入。Minecraft 的本地 TCP channel 仍保留原有处理。
+
+Sable 的激活令牌通过 Minecraft TCP 自定义 payload 传送，UDP 认证、数据报和 keep-alive 使用 Sable 自己的 datagram pipeline。ZstdNet 只压缩 Minecraft TCP 流量，不压缩 Sable UDP 数据报；Sable 的 UDP 超时回退行为不由 ZstdNet 改写。源码核对基于 Sable 上游提交 `6f2b321`（版本 2.0.5，Minecraft 1.21.1，NeoForge 21.1.228）。本项目目标为 NeoForge 21.1.223，因此该源码核对不等于已验证完整运行组合。
+
+### 其他独立 UDP 模组
+
+兼容分为两套规则：已知模组可增加专用的 pipeline/handler 排除（当前已覆盖 Sable）；未知模组走通用 `ServerChannel`/`DatagramChannel` 类型过滤。Simple Voice Chat (`modId = voicechat`) 当前实现使用独立 Java `DatagramSocket`（默认 UDP 24454），不注册到 Minecraft `ServerConnectionListener.channels`，所以天然不进入 ZstdNet 注入范围，不需要增加专用依赖或 API 链接。该判断适用于独立 socket；如果其他模组把 UDP 伪装为本地 `ServerChannel`，仍需增加其 handler 特征到已知排除表。
+
+已完成 IDEA MCP 项目读取/搜索、增量构建、`ZstdNettyPipelineTest`、根工程 `./gradlew test`、`bash ./build.sh` 和发行 JAR 生成；发行 JAR 中确认 Sable dependency type 为 `optional`。当前 `settings.gradle` 是单一根工程，没有 `main` Gradle 子项目，因此 `./gradlew :main:test` 不适用，正确测试任务为 `./gradlew test`。尚未完成同时安装 ZstdNet/Sable 的真实双端联机测试，特别是 UDP 激活、持续收发、keep-alive 超时回退及服务端关闭清理；该组合仍需在匹配的 NeoForge 环境实测。
+
 ## Benchmark 与等级
 
-手动 `/zstdnet complevel set <1-22>` 可设置完整等级范围；自动 benchmark 只比较 5 到 13 级，完成后可能覆盖临时手动等级。Benchmark 从真实网络包采集有界样本，并使用有界代表数据集测量 codec 时间和压缩结果；样本不足时等待后重试。调度器独立于服务端 tick 定时检查，只在周期到期且存在有效 ZstdNet 连接时触发。周期存储于 `config/zstdnet/server.properties`，可通过 `/zstdnet benchmark interval <分钟>` 动态修改。
+默认压缩等级为 3，`/zstdnet complevel set <1-22>` 可更改新连接使用的等级；已建立连接保持协商时等级。定时 benchmark 和自动应用等级默认关闭。管理员可用 `/zstdnet benchmark start` 手动评估；候选范围通过 `/zstdnet benchmark setbaseline <min> <max>` 配置，闭区间必须满足 1 <= min <= max <= 22，默认范围为 5-13。范围保存到 `config/zstdnet/server.properties` 的 `benchmark-baseline-min/max`。Benchmark 从真实网络包采集有界样本，在独立 executor 上使用独立 codec 和样本快照，不复用在线连接上下文。调度周期仍由 `/zstdnet benchmark interval <分钟>` 管理；定时执行可在服务器属性中显式启用。
 
 ## 字典
 
@@ -26,6 +40,10 @@ F8 打开 overlay 选择界面，可选 benchmark、管理状态和字典状态�
 
 `/zstdnet ping` 使用 nonce 请求/响应及 `System.nanoTime()` 测量 RTT，不复用 Minecraft 延迟值。`/zstdnet debug` 无额外权限要求，在 `config/debug/` 写入一次性 UTF-8 诊断报告，包含连接、流量/压缩、benchmark、字典、服务端 tick、JVM 与玩家 RTT 拆分信息，不进行逐包持续磁盘记录。
 
+`/zstdnet debug` 可由玩家、服务端控制台、命令方块和其他 `CommandSourceStack` 执行；报告中的 `requester` 使用命令源文本名称，不再要求存在玩家实体。日志诊断中若 `server_tick_max_ms` 达到数秒，应优先按服务端主线程停顿处理，而不是把 Tab 延迟直接归因于 ZstdNet 网络压缩；Netty 压缩线程栈与服务端 tick 栈需分别判断。
+
+连接诊断还会在 ZstdNet TCP pipeline 中安装 `zstdnet-diagnostics`。该 handler 不修改消息，仅记录 channel short id、remote、active/open 状态、最后一个入站/出站消息类型、pipeline、`close-request`、`disconnect-request`、`deregister-request`、`close-complete`、`channelInactive` 和 `exceptionCaught`；异常会保留完整 cause 到 FINE 日志。独立 `DatagramChannel` 在安装前被排除，因此不会安装该 handler、ZstdNet 编解码器或控制 handler。
+
 ## 构建与验证
 
-唯一项目构建入口为 `bash ./build.sh`。脚本清理 `target/` 中旧 JAR，运行 NeoForge 1.21.1 Gradle 构建，并将产物复制到 `target/`。根目录 `build.log` 记录该脚本输出，构建状态以日志末尾和脚本退出码为准。`./gradlew :core:test` 可运行共享核心回归测试。发行前应检查 JAR 包含 NeoForge 双端入口、共享模块与 zstd-jni；真实服务端/客户端连接、压缩表现和 screen 行为仍需游戏内验证。
+唯一项目构建入口为 `bash ./build.sh`。脚本清理 `target/` 中旧 JAR，运行根项目的 `clean build`，并将 `build/libs` 的运行时 JAR 复制到 `target/`。根目录 `build.log` 记录该脚本输出，构建状态以日志末尾和脚本退出码为准。`./gradlew test` 可运行全部回归测试。发行前应检查 JAR 包含 NeoForge 双端入口、`core`/`client`/`neoforge` 包和内嵌 zstd-jni JarJar 依赖；真实服务端/客户端连接、压缩表现和 screen 行为仍需游戏内验证。
