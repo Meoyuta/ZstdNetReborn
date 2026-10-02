@@ -6,6 +6,7 @@ import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
 
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Logger;
 
 public final class MinecraftCompressionDisabler extends ChannelDuplexHandler {
     public static final String HANDLER_NAME = "zstdnet-vanilla-compression-disabler";
@@ -13,6 +14,7 @@ public final class MinecraftCompressionDisabler extends ChannelDuplexHandler {
     private static final String PACKET_HANDLER = "packet_handler";
     private static final String COMPRESS = "compress";
     private static final String DECOMPRESS = "decompress";
+    private static final Logger LOGGER = Logger.getLogger("ZstdNet");
 
     private MinecraftCompressionDisabler() {
     }
@@ -62,7 +64,14 @@ public final class MinecraftCompressionDisabler extends ChannelDuplexHandler {
 
     private static void removeIfPresent(ChannelPipeline pipeline, String name) {
         try {
-            if (pipeline.get(name) != null) {
+            var existing = pipeline.get(name);
+            if (existing != null) {
+                var className = existing.getClass().getName();
+                if (!className.startsWith("net.minecraft.")) {
+                    LOGGER.warning("[ZstdNet] removed non-vanilla compression handler: " + className
+                        + ". If another network compression mod is installed, keep only one "
+                        + "(see README incompatible mods section).");
+                }
                 pipeline.remove(name);
             }
         } catch (RuntimeException ignored) {

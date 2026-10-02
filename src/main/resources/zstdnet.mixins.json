@@ -1,5 +1,5 @@
 {
-  "required": true,
+  "required": false,
   "minVersion": "0.8",
   "package": "mys.zstdnet.reborn.neoforge.mixin",
   "compatibilityLevel": "JAVA_21",
@@ -8,6 +8,9 @@
     "ConnectionMixin",
     "PlayerTabOverlayMixin",
     "ExportCopyFeedbackMixin"
+  ],
+  "mixins": [
+    "ServerConnectionListenerAccessor"
   ],
   "injectors": {
     "defaultRequire": 1

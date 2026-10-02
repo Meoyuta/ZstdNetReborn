@@ -14,8 +14,9 @@ import java.io.IOException;
  */
 public final class ZstdFrameCodec {
     public static final byte[] MAGIC = new byte[]{0x28, (byte) 0xB5, 0x2F, (byte) 0xFD};
+    public static final int PROTOCOL_VERSION = 2;
     public static final byte[] CAPABILITY_MAGIC = new byte[]{'Z', 'N', 'P', 1};
-    public static final byte[] CAPABILITY_RESPONSE = new byte[]{'Z', 'N', 'P', 2};
+    public static final byte[] CAPABILITY_RESPONSE = new byte[]{'Z', 'N', 'P', 2, (byte) PROTOCOL_VERSION};
     /** Maximum declared raw payload accepted from the wire. */
     public static final int MAX_FRAME_BYTES = (2 * 1024 * 1024) + (64 * 1024);
 

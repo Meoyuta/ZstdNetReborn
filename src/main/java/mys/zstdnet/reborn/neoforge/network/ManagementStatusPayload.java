@@ -19,6 +19,8 @@ public record ManagementStatusPayload(
         double ratioPercent,
         int connections,
         int compressionLevel,
+        int outboundLevel,
+        int inboundLevel,
         String dictionary,
         int dictionaryConnections,
         int selectedDictionaryConnections,
@@ -47,6 +49,8 @@ public record ManagementStatusPayload(
         buffer.writeDouble(payload.ratioPercent);
         buffer.writeVarInt(payload.connections);
         buffer.writeVarInt(payload.compressionLevel);
+        buffer.writeVarInt(payload.outboundLevel);
+        buffer.writeVarInt(payload.inboundLevel);
         buffer.writeUtf(payload.dictionary, 512);
         buffer.writeVarInt(payload.dictionaryConnections);
         buffer.writeVarInt(payload.selectedDictionaryConnections);
@@ -64,7 +68,7 @@ public record ManagementStatusPayload(
                 buffer.readVarLong(), buffer.readVarLong(),
                 buffer.readVarLong(), buffer.readVarLong(),
                 buffer.readVarLong(), buffer.readVarLong(),
-                buffer.readDouble(), buffer.readVarInt(), buffer.readVarInt(),
+                buffer.readDouble(), buffer.readVarInt(), buffer.readVarInt(), buffer.readVarInt(), buffer.readVarInt(),
                 buffer.readUtf(512), buffer.readVarInt(), buffer.readVarInt(), buffer.readVarInt(), buffer.readVarInt(), buffer.readDouble(),
                 buffer.readVarLong(), buffer.readVarInt());
     }

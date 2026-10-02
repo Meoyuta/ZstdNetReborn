@@ -26,6 +26,7 @@ public interface ZstdDictionaryDownloadListener {
 
     void completed(long dictionaryId);
 
+    @Deprecated(forRemoval = false)
     void failed(String message);
 
     default void failed(DictionaryFailure reason, String detail) {

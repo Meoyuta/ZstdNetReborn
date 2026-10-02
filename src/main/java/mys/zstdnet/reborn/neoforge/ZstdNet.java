@@ -7,6 +7,7 @@ import mys.zstdnet.reborn.core.dictionary.ZstdDictionaryStore;
 import mys.zstdnet.reborn.core.dictionary.ZstdDictionaryTrainer;
 import mys.zstdnet.reborn.core.benchmark.CompressionBenchmark;
 import mys.zstdnet.reborn.core.utils.ZstdNetLogger;
+import mys.zstdnet.reborn.core.netty.ZstdNettyEncoder;
 import mys.zstdnet.reborn.neoforge.client.*;
 import mys.zstdnet.reborn.neoforge.command.ZstdCommands;
 import mys.zstdnet.reborn.neoforge.network.*;
@@ -56,7 +57,7 @@ public final class ZstdNet {
     private ZstdDictionaryTrainer dictionaryTrainer;
     private CompressionBenchmark benchmark;
     private volatile net.minecraft.server.level.ServerPlayer pendingBenchmarkRequester;
-    private final AtomicInteger compressionLevel = new AtomicInteger(3);
+    private final AtomicInteger compressionLevel = new AtomicInteger(9);
     private final AtomicInteger benchmarkRunCount = new AtomicInteger();
     private volatile long runtimeStartedNanos;
     private final AtomicLong lastTickNanos = new AtomicLong();
@@ -144,14 +145,14 @@ public final class ZstdNet {
     }
 
     private synchronized void onServerStarted(ServerStartedEvent event) {
-        // Compression is enabled automatically for every dedicated-server session.
-        if (event.getServer().isDedicatedServer()) {
+        // Compression is enabled for dedicated servers and published LAN worlds.
+        if (event.getServer().isDedicatedServer() || event.getServer().isPublished()) {
             start(event.getServer());
         }
     }
 
     public synchronized boolean start(MinecraftServer server) {
-        if (!server.isDedicatedServer()) return false;
+        if (!server.isDedicatedServer() && !server.isPublished()) return false;
         if (injector != null) {
             if (!accepting) {
                 injector.inject();
@@ -197,6 +198,11 @@ public final class ZstdNet {
                 compressionLevel::get
             );
             next.inject();
+            if (SamePortZstdInjector.lastState() != SamePortZstdInjector.InjectState.OK) {
+                next.close();
+                logger.warn("ZstdNet injection unavailable; keeping vanilla networking");
+                return false;
+            }
             injector = next;
             dictionaryTrainer = trainer;
             accepting = true;
@@ -294,10 +300,11 @@ public final class ZstdNet {
         var selected = dictionaryStore.dictionary();
         var dictionary = selected == null ? "none" : selectedDictionaryDescription();
         player.connection.send(new net.minecraft.network.protocol.common.ClientboundCustomPayloadPacket(
-            new ManagementStatusPayload(isRunning() ? "running" : "stopped", player.getServer().getPort(),
+            new ManagementStatusPayload(injector == null ? "server_disabled" : SamePortZstdInjector.zstdState().wireName(), player.getServer().getPort(),
                 stats.wireUpBytes(), stats.rawUpBytes(), stats.wireDownBytes(), stats.rawDownBytes(),
                 stats.wireUpRate(), stats.rawUpRate(), stats.wireDownRate(), stats.rawDownRate(),
-                stats.ratioPercent(), stats.connections(), compressionLevel.get(), dictionary,
+                stats.ratioPercent(), stats.connections(), compressionLevel.get(), compressionLevel.get(),
+                mys.zstdnet.reborn.core.protocol.ZstdPersistentStreamCodec.DECODE_LEVEL, dictionary,
                 dictionaryConnections(), selectedDictionaryConnections(),
                 injector == null ? 0 : injector.dictionaryFallbacks(),
                 injector == null ? 0 : injector.activeDictionaryFallbacks(), latency,
@@ -498,6 +505,7 @@ public final class ZstdNet {
             out.write("requester=" + (requesterName == null ? "unknown" : requesterName) + "\n");
             out.write("zstdnet_running=" + isRunning() + "\n");
             out.write("inject_state=" + SamePortZstdInjector.lastState() + "\n");
+            out.write("zstd_state=" + SamePortZstdInjector.zstdState().wireName() + "\n");
             if (SamePortZstdInjector.lastError() != null) {
                 out.write("inject_error=" + SamePortZstdInjector.lastError() + "\n");
             }
@@ -515,6 +523,15 @@ public final class ZstdNet {
             out.write("rate_raw_download=" + stats.rawDownRate() + "\n");
             out.write("rate_wire_download=" + stats.wireDownRate() + "\n");
             out.write("compression_ratio_percent=" + String.format(Locale.ROOT, "%.4f", stats.ratioPercent()) + "\n");
+            var compressionMetrics = ZstdNettyEncoder.globalMetrics().snapshot();
+            out.write("compress_frames=" + compressionMetrics.frames() + "\n");
+            out.write("compress_batches=" + compressionMetrics.batches() + "\n");
+            out.write("compress_sync_us=" + compressionMetrics.syncMicros() + "\n");
+            out.write("compress_async_us=" + compressionMetrics.asyncMicros() + "\n");
+            out.write("compress_degraded=" + compressionMetrics.degraded() + "\n");
+            out.write("compress_dropped=" + compressionMetrics.dropped() + "\n");
+            out.write("compress_max_frame_us=" + compressionMetrics.maxFrameMicros() + "\n");
+            out.write("compress_size_hist=" + java.util.Arrays.toString(compressionMetrics.sizeHistogram()) + "\n");
             out.write("dictionary_connections=" + dictionaryConnections() + "\n");
             out.write("selected_dictionary_connections=" + selectedDictionaryConnections() + "\n");
             out.write("dictionary_uplink_fallbacks=" + (injector == null ? 0 : injector.dictionaryFallbacks()) + "\n");

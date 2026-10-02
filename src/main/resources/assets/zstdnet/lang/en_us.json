@@ -65,6 +65,8 @@
   "zstdnet.screen.status.ratio": "Compression ratio: %s",
   "zstdnet.screen.status.connections": "Active connections: %s",
   "zstdnet.screen.status.compression_level": "Compression level: %s",
+  "zstdnet.screen.status.outbound_level": "Server outbound level: %s",
+  "zstdnet.screen.status.inbound_level": "Server inbound level: %s",
   "zstdnet.screen.status.runtime": "Runtime: %s",
   "zstdnet.screen.status.benchmark_runs": "Benchmark runs: %s",
   "zstdnet.screen.status.dictionary": "Dictionary: %s",

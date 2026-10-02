@@ -401,8 +401,8 @@ public final class CompressionBenchmark implements AutoCloseable {
             logger.warn("Invalid benchmark baseline in " + configPath + "; using "
                     + DEFAULT_BASELINE_MIN + "-" + DEFAULT_BASELINE_MAX);
         }
-        var configuredLevel = config.getProperty("compression-level", "3").trim();
-        levelSetter.accept(Math.clamp(parseInt(configuredLevel, 3), 1, 22));
+        var configuredLevel = config.getProperty("compression-level", "9").trim();
+        levelSetter.accept(Math.clamp(parseInt(configuredLevel, 9), 1, 22));
         config.setProperty("benchmark-interval-minutes", Integer.toString(intervalMinutes));
         config.setProperty("benchmark-scheduled-enabled", Boolean.toString(scheduledEnabled));
         config.setProperty("benchmark-auto-apply", Boolean.toString(automatic));

@@ -86,6 +86,8 @@ public final class ZstdNettyPipeline {
                 moveAfter(pipeline, INBOUND_HANDLER, DECRYPT);
             } else if (pipeline.get(SPLITTER) != null) {
                 moveBefore(pipeline, INBOUND_HANDLER, SPLITTER);
+            } else {
+                LOGGER.warning("ZstdNet inbound pipeline anchor missing: splitter/decrypt; leaving handler in place");
             }
         }
         if (pipeline.get(OUTBOUND_HANDLER) != null) {
@@ -93,6 +95,8 @@ public final class ZstdNettyPipeline {
                 moveAfter(pipeline, OUTBOUND_HANDLER, ENCRYPT);
             } else if (pipeline.get(PREPENDER) != null) {
                 moveBefore(pipeline, OUTBOUND_HANDLER, PREPENDER);
+            } else {
+                LOGGER.warning("ZstdNet outbound pipeline anchor missing: prepender/encrypt; leaving handler in place");
             }
         }
     }

@@ -12,6 +12,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.atomic.AtomicInteger;
+import java.io.ByteArrayOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import net.minecraft.network.protocol.login.ClientboundLoginCompressionPacket;
@@ -84,7 +85,9 @@ class ZstdNettyPipelineTest {
         var first = new byte[4096];
         java.util.Arrays.fill(first, (byte) 'a');
         server.writeOutbound(Unpooled.wrappedBuffer(first));
+        server.checkException();
         client.writeInbound(awaitOutbound(server));
+        client.checkException();
         assertInbound(client, first);
 
         server.pipeline().addLast("encrypt", new ChannelOutboundHandlerAdapter());
@@ -94,7 +97,9 @@ class ZstdNettyPipelineTest {
         System.arraycopy(first, 0, second, 0, first.length);
         second[second.length - 1] = 'b';
         server.writeOutbound(Unpooled.wrappedBuffer(second));
+        server.checkException();
         client.writeInbound(awaitOutbound(server));
+        client.checkException();
         assertInbound(client, second);
 
         server.finishAndReleaseAll();
@@ -107,6 +112,7 @@ class ZstdNettyPipelineTest {
         var encoder = new EmbeddedChannel(new ZstdNettyEncoder(3, true, ZstdFrameStats.NONE));
 
         encoder.writeOutbound(Unpooled.wrappedBuffer(raw));
+        encoder.checkException();
         ByteBuf encoded = awaitOutbound(encoder);
         try {
             for (byte magicByte : ZstdFrameCodec.MAGIC) {
@@ -115,6 +121,7 @@ class ZstdNettyPipelineTest {
 
             var decoder = new EmbeddedChannel(new ZstdNettyDecoder(ZstdFrameStats.NONE));
             assertTrue(decoder.writeInbound(encoded.retainedSlice()));
+            decoder.checkException();
             ByteBuf decoded = decoder.readInbound();
             try {
                 var actual = new byte[decoded.readableBytes()];
@@ -140,6 +147,7 @@ class ZstdNettyPipelineTest {
         var decoder = new EmbeddedChannel(new ZstdNettyDecoder(ZstdFrameStats.NONE));
         try {
             assertTrue(decoder.writeInbound(frame.retain()));
+            decoder.checkException();
             ByteBuf decoded = decoder.readInbound();
             try {
                 assertNotNull(decoded);
@@ -171,10 +179,12 @@ class ZstdNettyPipelineTest {
         var raw = new byte[4096];
         java.util.Arrays.fill(raw, (byte) 'z');
         encoder.writeOutbound(Unpooled.wrappedBuffer(raw));
+        encoder.checkException();
         ByteBuf first = awaitOutbound(encoder);
         first.release();
         level.set(22);
         encoder.writeOutbound(Unpooled.wrappedBuffer(raw));
+        encoder.checkException();
         ByteBuf second = awaitOutbound(encoder);
         second.release();
         assertEquals(2, calls.get(), "the live level supplier must be queried for every frame");
@@ -194,13 +204,17 @@ class ZstdNettyPipelineTest {
         java.util.Arrays.fill(raw, (byte) 'z');
         try {
             server.writeOutbound(Unpooled.wrappedBuffer(raw));
+            server.checkException();
             client.writeInbound(awaitOutbound(server));
+            client.checkException();
             assertInbound(client, raw);
 
             level.set(9);
             raw[raw.length - 1] = 'x';
             server.writeOutbound(Unpooled.wrappedBuffer(raw));
+            server.checkException();
             client.writeInbound(awaitOutbound(server));
+            client.checkException();
             assertInbound(client, raw);
         } finally {
             server.finishAndReleaseAll();
@@ -218,11 +232,86 @@ class ZstdNettyPipelineTest {
         MinecraftCompressionDisabler.install(pipeline);
 
         assertFalse(channel.writeOutbound(new ClientboundLoginCompressionPacket()));
+        channel.checkException();
         channel.runPendingTasks();
         channel.runScheduledPendingTasks();
 
         assertNull(pipeline.get("compress"));
         assertNull(pipeline.get("decompress"));
+    }
+
+    @Test
+    void batchesOneHundredSmallPacketsWithoutChangingBytes() throws Exception {
+        var packets = new byte[100][20];
+        for (var i = 0; i < packets.length; i++) {
+            for (var j = 0; j < packets[i].length; j++) packets[i][j] = (byte) (i * 3 + j);
+        }
+
+        var individual = new EmbeddedChannel(new ZstdNettyEncoder(9, false, ZstdFrameStats.NONE));
+        var individualWireBytes = 0;
+        try {
+            for (var packet : packets) {
+                individual.writeOutbound(Unpooled.wrappedBuffer(packet));
+                var encoded = awaitOutbound(individual);
+                individualWireBytes += encoded.readableBytes();
+                encoded.release();
+            }
+        } finally {
+            individual.finishAndReleaseAll();
+        }
+
+        var batchedEncoder = new ZstdNettyEncoder(9, false, ZstdFrameStats.NONE);
+        var batched = new EmbeddedChannel(batchedEncoder);
+        var decoder = new EmbeddedChannel(new ZstdNettyDecoder(ZstdFrameStats.NONE));
+        var wireBytes = 0;
+        try {
+            for (var packet : packets) batched.writeOutbound(Unpooled.wrappedBuffer(packet));
+            batched.checkException();
+            long deadline = System.nanoTime() + 5_000_000_000L;
+            long idleSince = 0L;
+            while (System.nanoTime() < deadline) {
+                batched.runPendingTasks();
+                batched.runScheduledPendingTasks();
+                ByteBuf encoded;
+                var produced = false;
+                while ((encoded = batched.readOutbound()) != null) {
+                    produced = true;
+                    wireBytes += encoded.readableBytes();
+                    decoder.writeInbound(encoded);
+                    decoder.checkException();
+                }
+                if (batchedEncoder.isIdleForMove()) {
+                    if (idleSince == 0L) idleSince = System.nanoTime();
+                    if (System.nanoTime() - idleSince >= 20_000_000L) break;
+                } else {
+                    idleSince = 0L;
+                }
+                if (!produced) Thread.sleep(1L);
+            }
+            var expected = new ByteArrayOutputStream();
+            for (var packet : packets) expected.write(packet);
+            var actual = new ByteArrayOutputStream();
+            ByteBuf decoded;
+            while ((decoded = decoder.readInbound()) != null) {
+                try {
+                    var bytes = new byte[decoded.readableBytes()];
+                    decoded.readBytes(bytes);
+                    actual.write(bytes);
+                } finally {
+                    decoded.release();
+                }
+            }
+            assertArrayEquals(expected.toByteArray(), actual.toByteArray());
+            assertTrue(wireBytes < individualWireBytes / 2,
+                "batched wire bytes=" + wireBytes + " individual=" + individualWireBytes);
+        } finally {
+            try {
+                batched.finishAndReleaseAll();
+            } catch (Exception ignored) {
+                // The aggregate promise is completed as the EmbeddedChannel closes.
+            }
+            decoder.finishAndReleaseAll();
+        }
     }
 
     private static EmbeddedChannel minecraftLikeChannel() {
@@ -253,6 +342,7 @@ class ZstdNettyPipelineTest {
         while ((result = channel.readOutbound()) == null && System.nanoTime() < deadline) {
             channel.runPendingTasks();
             channel.runScheduledPendingTasks();
+            channel.checkException();
             Thread.yield();
         }
         assertNotNull(result, "asynchronous compressed output did not arrive");

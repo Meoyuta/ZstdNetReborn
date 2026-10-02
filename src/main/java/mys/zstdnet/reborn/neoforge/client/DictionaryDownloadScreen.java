@@ -83,6 +83,12 @@ public final class DictionaryDownloadScreen extends ProgressScreen {
                 restore();
             }
 
+            @Override
+            public void failed(ZstdDictionaryDownloadListener.DictionaryFailure reason, String message) {
+                LOGGER.warn("Server dictionary synchronization failed ({}): {}", reason, message);
+                restore();
+            }
+
             private void restore() {
                 Minecraft.getInstance().execute(() -> {
                     var client = Minecraft.getInstance();

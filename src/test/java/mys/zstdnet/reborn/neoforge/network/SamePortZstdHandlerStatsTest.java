@@ -25,7 +25,7 @@ class SamePortZstdHandlerStatsTest {
     @TempDir Path directory;
 
     @Test
-    void samplesByteBufsForTrainingAndBenchmarkWithoutMovingIndices() throws Exception {
+    void samplesByteBufsForActiveTrainingWithoutMovingIndices() throws Exception {
         var store = new ZstdDictionaryStore(directory.resolve("dictionary.zdict"), LOGGER);
         try (var trainer = new ZstdDictionaryTrainer(store, LOGGER);
              var benchmark = new CompressionBenchmark(directory.resolve("server.properties"), LOGGER,
@@ -44,7 +44,8 @@ class SamePortZstdHandlerStatsTest {
                 assertEquals(1, inbound.readerIndex());
                 assertEquals(1, outbound.readerIndex());
                 assertEquals(2, trainer.status().sampleCount());
-                assertEquals(2, benchmark.sampleCount());
+                // Benchmark sampling is gated until an explicit benchmark run is active.
+                assertEquals(0, benchmark.sampleCount());
             } finally {
                 inbound.release();
                 outbound.release();

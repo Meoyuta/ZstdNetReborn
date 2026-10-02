@@ -1,5 +1,5 @@
 modLoader = "javafml"
-loaderVersion = "[1,)"
+loaderVersion = "[1,2)"
 license = "MIT"
 
 [[mods]]
@@ -16,7 +16,7 @@ config = "zstdnet.mixins.json"
 [[dependencies.${mod_id}]]
 modId = "neoforge"
 type = "required"
-versionRange = "[${neoforge_version},)"
+versionRange = "[${neoforge_version},22)"
 ordering = "NONE"
 side = "BOTH"
 
@@ -30,6 +30,6 @@ side = "BOTH"
 [[dependencies.${mod_id}]]
 modId = "sable"
 type = "optional"
-versionRange = "[2.0.5,)"
+versionRange = "[2.0.5,3)"
 ordering = "NONE"
 side = "BOTH"

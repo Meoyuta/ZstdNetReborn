@@ -35,6 +35,8 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
     private static final long HANDSHAKE_TIMEOUT_MILLIS = 10_000L;
     private static final ConcurrentHashMap<String, AtomicInteger> ACTIVE_BY_IP = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, Window> HANDSHAKES_BY_IP = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, Long> DOWNLINK_DICTIONARY_SEEN = new ConcurrentHashMap<>();
+    private static final AtomicInteger ADMISSION_ATTEMPTS = new AtomicInteger();
     private enum Mode {
         UNDECIDED,
         RAW,
@@ -99,6 +101,7 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
             return;
         }
         if (startsWith(in, ZstdFrameCodec.CAPABILITY_MAGIC)) {
+            // Capability probes never consume a connection slot or handshake budget.
             in.skipBytes(ZstdFrameCodec.CAPABILITY_MAGIC.length);
             ctx.writeAndFlush(Unpooled.wrappedBuffer(ZstdFrameCodec.CAPABILITY_RESPONSE))
                 .addListener(ChannelFutureListener.CLOSE);
@@ -143,11 +146,30 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
             streamHeaderRead = true;
             logger.debug("ZSTD stream header accepted remote=" + ctx.channel().remoteAddress());
             countConnection(ctx);
-            var offered = dictionaryStore.dictionary();
+            var selectedDictionary = dictionaryStore.dictionary();
+            var remoteAddress = ctx.channel().remoteAddress();
+            var dictionaryKey = remoteAddress instanceof java.net.InetSocketAddress socket
+                ? socket.getHostString() : String.valueOf(remoteAddress);
+            var offered = selectedDictionary;
+            if (selectedDictionary != null) {
+                var shouldOffer = new AtomicBoolean();
+                DOWNLINK_DICTIONARY_SEEN.compute(dictionaryKey, (key, previousId) -> {
+                    if (previousId == null || previousId.longValue() != selectedDictionary.id()) {
+                        shouldOffer.set(true);
+                        return selectedDictionary.id();
+                    }
+                    return previousId;
+                });
+                if (!shouldOffer.get()) offered = null;
+            }
+            if (selectedDictionary != null && offered == null) {
+                logger.debug("skipping repeated downlink dictionary offer for " + dictionaryKey);
+            }
             var dictionaryActive = new AtomicBoolean();
+            var activeDictionaryId = new java.util.concurrent.atomic.AtomicLong();
             var fallbackActive = new AtomicBoolean();
             ctx.channel().closeFuture().addListener(future -> {
-                if (dictionaryActive.compareAndSet(true, false)) stats.addDictionaryConnection(offered.id(), -1);
+                if (dictionaryActive.compareAndSet(true, false)) stats.addDictionaryConnection(activeDictionaryId.get(), -1);
                 if (fallbackActive.compareAndSet(true, false)) stats.addActiveDictionaryFallback(-1);
             });
             var session = ZstdDictionarySession.server(offered, dictionaryStore.uplinkDictionary(),
@@ -159,6 +181,7 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
                     public void progress(int received, int total) {}
                     public void completed(long id) {
                         if (ctx.channel().isActive() && dictionaryActive.compareAndSet(false, true)) {
+                            activeDictionaryId.set(id);
                             stats.addDictionaryConnection(id, 1);
                             logger.info("Dictionary ACK confirmed from " + ctx.channel().remoteAddress()
                                 + ", id=" + Long.toUnsignedString(id));
@@ -219,6 +242,11 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
     }
 
     private boolean admit(ChannelHandlerContext ctx) {
+        if ((ADMISSION_ATTEMPTS.incrementAndGet() & 1023) == 0) {
+            var now = System.currentTimeMillis();
+            HANDSHAKES_BY_IP.entrySet().removeIf(entry -> now - entry.getValue().startedAt > 60_000L);
+            ACTIVE_BY_IP.entrySet().removeIf(entry -> entry.getValue().get() <= 0);
+        }
         var address = ctx.channel().remoteAddress();
         var ip = address instanceof java.net.InetSocketAddress socket
             ? socket.getAddress().getHostAddress() : String.valueOf(address);
@@ -277,14 +305,14 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
 
             @Override
             public void inboundSample(ByteBuf raw) {
-                if (dictionaryTrainer.isActive()) dictionaryTrainer.capture(true, raw);
-                benchmark.capture(raw);
+            if (dictionaryTrainer.isActive()) dictionaryTrainer.capture(true, raw);
+                if (benchmark.isActive()) benchmark.capture(raw);
             }
 
             @Override
             public void outboundSample(ByteBuf raw) {
                 if (dictionaryTrainer.isActive()) dictionaryTrainer.capture(false, raw);
-                benchmark.capture(raw);
+                if (benchmark.isActive()) benchmark.capture(raw);
             }
         };
     }

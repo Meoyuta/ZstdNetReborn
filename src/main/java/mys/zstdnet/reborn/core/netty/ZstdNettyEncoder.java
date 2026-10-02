@@ -6,6 +6,11 @@ import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelPromise;
 import mys.zstdnet.reborn.core.protocol.ZstdPersistentStreamCodec;
 import java.nio.channels.ClosedChannelException;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.function.IntSupplier;
 import mys.zstdnet.reborn.core.stats.CompressionMetrics;
 import org.slf4j.Logger;
@@ -13,6 +18,10 @@ import org.slf4j.LoggerFactory;
 
 public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     private static final Logger LOGGER = LoggerFactory.getLogger("ZstdNet");
+    private static final int MAX_BATCH_BYTES = 64 * 1024;
+    private static final int FLUSH_DELAY_MILLIS = 2;
+    private static final int MAX_PENDING_PACKETS = 4096;
+    private static final CompressionMetrics GLOBAL_METRICS = new CompressionMetrics();
     private final IntSupplier level;
     private final boolean sendMagic;
     private final ZstdFrameStats stats;
@@ -24,7 +33,10 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     private int persistentLevel = Integer.MIN_VALUE;
     private boolean ownsPersistentStream = true;
     private boolean closed;
-    private final CompressionMetrics metrics = new CompressionMetrics();
+    private final CompressionMetrics metrics = GLOBAL_METRICS;
+    private final ArrayDeque<PendingWrite> pending = new ArrayDeque<>();
+    private int pendingBytes;
+    private ScheduledFuture<?> scheduledFlush;
 
     public ZstdNettyEncoder(int level, boolean sendMagic, ZstdFrameStats stats) {
         this(() -> level, sendMagic, stats, null);
@@ -54,16 +66,21 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     }
 
     boolean isIdleForMove() {
-        return true;
+        return pending.isEmpty() && scheduledFlush == null;
     }
 
     public CompressionMetrics metrics() {
         return metrics;
     }
 
+    public static CompressionMetrics globalMetrics() {
+        return GLOBAL_METRICS;
+    }
+
     @Override
     public void write(io.netty.channel.ChannelHandlerContext ctx, Object message, ChannelPromise promise) throws Exception {
         if (!(message instanceof ByteBuf msg)) {
+            flushPending(ctx);
             ctx.write(message, promise);
             return;
         }
@@ -73,36 +90,34 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
             promise.tryFailure(new ClosedChannelException());
             return;
         }
-        ByteBuf encoded = ctx.alloc().buffer();
-        try {
-            encode(ctx, msg, encoded);
-        } catch (Throwable error) {
-            encoded.release();
-            msg.release();
-            promise.tryFailure(error);
-            ctx.fireExceptionCaught(error);
+        int length = msg.readableBytes();
+        if (length >= MAX_BATCH_BYTES) {
+            flushPending(ctx);
+            emitBatch(ctx, List.of(new PendingWrite(msg, promise)));
             return;
         }
-        msg.release();
-        if (encoded.isReadable()) {
-            ctx.write(encoded, promise);
-            ctx.flush();
-        } else {
-            encoded.release();
-            promise.trySuccess();
+        if (pendingBytes + length > MAX_BATCH_BYTES) {
+            flushPending(ctx);
         }
+        pending.addLast(new PendingWrite(msg, promise));
+        pendingBytes += length;
+        if (pending.size() >= MAX_PENDING_PACKETS) {
+            flushPending(ctx);
+        }
+        scheduleFlush(ctx);
     }
 
     @Override
     public void channelInactive(io.netty.channel.ChannelHandlerContext ctx) throws Exception {
         LOGGER.debug("encoder channelInactive");
         closed = true;
+        cancelScheduledFlush();
+        failPending(new ClosedChannelException());
         closePersistentStreamQuietly();
         super.channelInactive(ctx);
     }
 
     private void encode(io.netty.channel.ChannelHandlerContext ctx, ByteBuf msg, ByteBuf out) throws Exception {
-        long started = System.nanoTime();
         var readable = msg.readableBytes();
         if (readable <= 0 && (dictionarySession == null || !dictionarySession.hasPendingControl())) {
             return;
@@ -163,8 +178,97 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
         }
         stats.outbound(rawLength, wireBytes);
         stats.outboundSample(msg);
-        metrics.recordSync(rawLength, 1, System.nanoTime() - started);
     }
+
+    @Override
+    public void flush(io.netty.channel.ChannelHandlerContext ctx) throws Exception {
+        if (pending.isEmpty()) {
+            ctx.flush();
+            return;
+        }
+        if (!ctx.channel().isWritable() || pendingBytes >= MAX_BATCH_BYTES) {
+            flushPending(ctx);
+            ctx.flush();
+            return;
+        }
+        scheduleFlush(ctx);
+    }
+
+    private void flushPending(io.netty.channel.ChannelHandlerContext ctx) {
+        if (pending.isEmpty()) return;
+        cancelScheduledFlush();
+        var batch = new ArrayList<PendingWrite>(pending);
+        pending.clear();
+        pendingBytes = 0;
+        emitBatch(ctx, batch);
+    }
+
+    private void scheduleFlush(io.netty.channel.ChannelHandlerContext ctx) {
+        if (scheduledFlush != null) return;
+        scheduledFlush = ctx.executor().schedule(() -> {
+            scheduledFlush = null;
+            if (!closed) {
+                flushPending(ctx);
+                ctx.flush();
+            }
+        }, FLUSH_DELAY_MILLIS, TimeUnit.MILLISECONDS);
+    }
+
+    private void emitBatch(io.netty.channel.ChannelHandlerContext ctx, List<PendingWrite> batch) {
+        int total = batch.stream().mapToInt(value -> value.message.readableBytes()).sum();
+        ByteBuf raw = ctx.alloc().buffer(Math.max(256, total), Math.max(256, total));
+        for (var item : batch) {
+            raw.writeBytes(item.message, item.message.readerIndex(), item.message.readableBytes());
+            item.message.release();
+        }
+        ByteBuf encoded = ctx.alloc().buffer();
+        long started = System.nanoTime();
+        boolean rawReleased = false;
+        try {
+            encode(ctx, raw, encoded);
+            raw.release();
+            rawReleased = true;
+            if (!encoded.isReadable()) {
+                encoded.release();
+                for (var item : batch) item.promise.trySuccess();
+                return;
+            }
+            var aggregate = ctx.newPromise();
+            aggregate.addListener(future -> {
+                for (var item : batch) {
+                    if (future.isSuccess()) item.promise.trySuccess();
+                    else item.promise.tryFailure(future.cause());
+                }
+                if (!future.isSuccess()) ctx.close();
+            });
+            ctx.write(encoded, aggregate);
+            metrics.recordSync(total, batch.size(), System.nanoTime() - started);
+        } catch (Throwable error) {
+            if (!rawReleased) raw.release();
+            encoded.release();
+            for (var item : batch) item.promise.tryFailure(error);
+            ctx.fireExceptionCaught(error);
+            ctx.close();
+        }
+    }
+
+    private void failPending(Throwable error) {
+        while (!pending.isEmpty()) {
+            var item = pending.removeFirst();
+            item.message.release();
+            item.promise.tryFailure(error);
+        }
+        pendingBytes = 0;
+    }
+
+    private void cancelScheduledFlush() {
+        if (scheduledFlush != null) {
+            scheduledFlush.cancel(false);
+            scheduledFlush = null;
+        }
+    }
+
+    private record PendingWrite(ByteBuf message, ChannelPromise promise) {}
 
     @Override
     public void handlerRemoved(io.netty.channel.ChannelHandlerContext ctx) throws Exception {

@@ -16,6 +16,16 @@ The artifact is copied to `target/ZstdNet-1.21.1-neoforge-server-client-<version
 
 The newly generated client configuration is disabled by default (`enabled=false`). When enabled, every server is checked with the ZstdNet capability probe before compression is installed; there is no server whitelist or probe bypass. Ordinary servers stay on the plain protocol when probing fails. LAN/integrated-server hosting is not supported.
 
+## Incompatible Mods
+
+The following mods cannot be installed together with ZstdNet. Their compression features are mutually exclusive; choose exactly one:
+
+| Mod | Mod ID | Reason |
+|---|---|---|
+| Krypton and its forks | `krypton` and similar IDs | Both occupy Minecraft's Netty compression slots |
+
+When both are installed, ZstdNet may replace the other compression handler while installing its own pipeline. This is not a supported combination and is not a crash-safe negotiation mechanism. Remove one of the compression mods before starting the game.
+
 ## Features
 
 - Same-port Zstandard protocol detection and Netty compression.

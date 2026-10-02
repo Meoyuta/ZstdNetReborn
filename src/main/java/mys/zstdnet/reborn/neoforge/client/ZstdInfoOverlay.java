@@ -94,6 +94,8 @@ public final class ZstdInfoOverlay {
         y = line(g, y, "ratio", number(p.ratioPercent(), "%", "%.2f"), "status");
         y = line(g, y, "connections", data(Integer.toString(p.connections())), "status");
         y = line(g, y, "compression_level", data(Integer.toString(p.compressionLevel())), "status");
+        y = line(g, y, "outbound_level", data(Integer.toString(p.outboundLevel())), "status");
+        y = line(g, y, "inbound_level", data(Integer.toString(p.inboundLevel())), "status");
         y = line(g, y, "latency", number(p.latencyMillis(), " ms", "%.2f"), "status");
         y = line(g, y, "runtime", data(formatDuration(p.uptimeSeconds())), "status");
         y = line(g, y, "benchmark_runs", data(Integer.toString(p.benchmarkRuns())), "status");

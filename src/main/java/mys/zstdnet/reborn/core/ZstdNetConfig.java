@@ -12,7 +12,7 @@ public record ZstdNetConfig(
             true,
             listen,
             target,
-            3,
+            9,
             "This server requires the ZstdNet client mod."
         );
     }

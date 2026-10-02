@@ -34,9 +34,12 @@ public final class ZstdNetConnectionHooks {
             ZstdNetClient.logger().debug("prepare skipped: disabled for " + host + ":" + port);
             return false;
         }
-        if (!CapabilityProbe.probe(host, port)) {
+        var capability = CapabilityProbe.cached(host, port);
+        if (!Boolean.TRUE.equals(capability)) {
             PENDING.remove(key(host, port));
-            ZstdNetClient.logger().warn("ZstdNet capability probe failed; using ordinary connection for " + host + ":" + port);
+            CapabilityProbe.start(host, port);
+            ZstdNetClient.logger().debug("ZstdNet capability probe pending or failed; using ordinary connection for "
+                + host + ":" + port);
             return false;
         }
 
@@ -63,7 +66,7 @@ public final class ZstdNetConnectionHooks {
         }
         if (isDatagramPipeline(pipeline)) {
             ZstdNetClient.logger().debug("install skipped: non-Sable DatagramChannel pipeline is passthrough, names="
-                + pipeline.names());
+                + (pipeline != null ? pipeline.names() : "null"));
             return;
         }
         var remote = pipeline.channel().remoteAddress();

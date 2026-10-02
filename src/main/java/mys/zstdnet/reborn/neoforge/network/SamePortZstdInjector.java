@@ -13,9 +13,8 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.socket.DatagramChannel;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerConnectionListener;
+import mys.zstdnet.reborn.neoforge.mixin.ServerConnectionListenerAccessor;
 
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -27,10 +26,6 @@ public final class SamePortZstdInjector implements AutoCloseable {
     private static volatile Throwable lastError;
     private static final String ACCEPT_HANDLER = "zstdnet-accept-injector";
     private static final String CONNECTION_HANDLER = "zstdnet-same-port-codec";
-    // Resolve once and read directly from a static final exact handle, following:
-    // https://gist.github.com/burningtnt/e4b39edadd0637cfb78e98dd7cfe3b87
-    private static final VarHandle CHANNELS = resolveChannelsHandle();
-
     private final MinecraftServer minecraftServer;
     private final ZstdNetConfig config;
     private final ZstdNetLogger logger;
@@ -67,7 +62,8 @@ public final class SamePortZstdInjector implements AutoCloseable {
         List<Channel> serverChannels = serverChannels();
         if (serverChannels.isEmpty()) {
             lastState = InjectState.NO_CHANNELS;
-            throw new IllegalStateException("could not find Minecraft server Netty channels");
+            logger.warn("ZstdNet could not find Minecraft server Netty channels; keeping vanilla networking");
+            return;
         }
 
         try {
@@ -102,6 +98,13 @@ public final class SamePortZstdInjector implements AutoCloseable {
     public static InjectState lastState() { return lastState; }
     public static Throwable lastError() { return lastError; }
 
+    public static ZstdState zstdState() {
+        return switch (lastState) {
+            case OK -> ZstdState.ACTIVE;
+            case NO_CHANNELS, EXCEPTION -> ZstdState.INJECT_FAILED;
+        };
+    }
+
     @Override
     public void close() {
         for (Channel channel : injectedServerChannels) {
@@ -130,21 +133,17 @@ public final class SamePortZstdInjector implements AutoCloseable {
         return channels;
     }
 
-    @SuppressWarnings("unchecked")
     private static List<ChannelFuture> channelFutures(ServerConnectionListener connectionListener) {
-        List<ChannelFuture> futures = (List<ChannelFuture>) CHANNELS.get(connectionListener);
-        synchronized (futures) {
-            return List.copyOf(futures);
-        }
-    }
-
-    private static VarHandle resolveChannelsHandle() {
         try {
-            return MethodHandles.privateLookupIn(ServerConnectionListener.class, MethodHandles.lookup())
-                .findVarHandle(ServerConnectionListener.class, "channels", List.class)
-                .withInvokeExactBehavior();
-        } catch (NoSuchFieldException | IllegalAccessException e) {
-            throw new ExceptionInInitializerError(e);
+            List<ChannelFuture> futures = ((ServerConnectionListenerAccessor) connectionListener).zstdnet$getChannels();
+            if (futures == null) return List.of();
+            synchronized (futures) {
+                return List.copyOf(futures);
+            }
+        } catch (RuntimeException error) {
+            lastState = InjectState.EXCEPTION;
+            lastError = error;
+            return List.of();
         }
     }
 

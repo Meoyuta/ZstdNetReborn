@@ -26,9 +26,13 @@ class DictionarySyncTest {
         try {
             var raw = DictionaryFixtures.samples()[0];
             server.writeOutbound(Unpooled.wrappedBuffer(raw));
+            server.checkException();
             ByteBuf wire = awaitOutbound(server);
             try {
-                while (wire.isReadable()) client.writeInbound(wire.readRetainedSlice(Math.min(97, wire.readableBytes())));
+                while (wire.isReadable()) {
+                    client.writeInbound(wire.readRetainedSlice(Math.min(97, wire.readableBytes())));
+                    client.checkException();
+                }
             } finally { wire.release(); }
             assertTrue(progress.get() > 1);
             assertEquals(1, completed.get());
@@ -38,12 +42,17 @@ class DictionarySyncTest {
             ByteBuf ack = awaitOutbound(client);
             assertTrue(ZstdStreamHeader.read(ack)); // Same-port handler consumes the first client header.
             server.writeInbound(ack);
+            server.checkException();
             assertSame(dictionary, serverSession.activeDictionary());
             server.writeOutbound(Unpooled.wrappedBuffer(raw));
+            server.checkException();
             client.writeInbound(awaitOutbound(server));
+            client.checkException();
             assertPayload(client, raw);
             client.writeOutbound(Unpooled.wrappedBuffer(raw));
+            client.checkException();
             server.writeInbound(awaitOutbound(client));
+            server.checkException();
             assertPayload(server, raw);
         } finally {
             server.finishAndReleaseAll();
@@ -57,7 +66,9 @@ class DictionarySyncTest {
         var client = channel(session);
         try {
             server.writeOutbound(Unpooled.wrappedBuffer(new byte[]{1,2,3}));
+            server.checkException();
             client.writeInbound(awaitOutbound(server));
+            client.checkException();
             assertPayload(client, new byte[]{1,2,3});
             assertNull(session.activeDictionary());
             assertNull(client.readOutbound());
