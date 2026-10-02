@@ -5,13 +5,24 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelPromise;
 import mys.zstdnet.reborn.core.protocol.ZstdPersistentStreamCodec;
-import java.nio.channels.ClosedChannelException;
+import mys.zstdnet.reborn.core.protocol.VarIntCodec;
+import java.util.ArrayDeque;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.function.IntSupplier;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 public final class ZstdNettyEncoder extends ChannelDuplexHandler {
-    private static final Logger LOGGER = LoggerFactory.getLogger("ZstdNet");
+    private static final int MAX_PENDING_PACKETS = 128;
+    private static final long MAX_PENDING_BYTES = 32L * 1024 * 1024;
+    private static final int WORKER_COUNT = Math.max(2, Runtime.getRuntime().availableProcessors() / 2);
+    private static final ThreadPoolExecutor COMPRESSORS = new ThreadPoolExecutor(
+        WORKER_COUNT, WORKER_COUNT, 30L, TimeUnit.SECONDS, new ArrayBlockingQueue<>(512), task -> {
+            var thread = new Thread(task, "zstdnet-compress-worker");
+            thread.setDaemon(true);
+            return thread;
+        }, new ThreadPoolExecutor.AbortPolicy()
+    );
     private final IntSupplier level;
     private final boolean sendMagic;
     private final ZstdFrameStats stats;
@@ -22,7 +33,10 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     private long persistentDictionaryId = Long.MIN_VALUE;
     private int persistentLevel = Integer.MIN_VALUE;
     private boolean ownsPersistentStream = true;
-    private boolean closed;
+    private final ArrayDeque<PendingWrite> pendingWrites = new ArrayDeque<>();
+    private long pendingBytes;
+    private boolean compressionActive;
+    private boolean closeWhenIdle;
 
     public ZstdNettyEncoder(int level, boolean sendMagic, ZstdFrameStats stats) {
         this(() -> level, sendMagic, stats, null);
@@ -52,7 +66,7 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     }
 
     boolean isIdleForMove() {
-        return true;
+        return !compressionActive && pendingWrites.isEmpty();
     }
 
     @Override
@@ -61,38 +75,64 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
             ctx.write(message, promise);
             return;
         }
-        if (closed || !ctx.channel().isActive()) {
-            LOGGER.debug("encoder write rejected: closed={} active={}", closed, ctx.channel().isActive());
+        int bytes = msg.readableBytes();
+        if (!queueWithinLimits(pendingWrites.size(), pendingBytes, bytes)) {
             msg.release();
-            promise.tryFailure(new ClosedChannelException());
+            promise.tryFailure(new IllegalStateException("ZstdNet compression queue limit exceeded"));
+            ctx.close();
             return;
         }
-        ByteBuf encoded = ctx.alloc().buffer();
-        try {
-            encode(ctx, msg, encoded);
-        } catch (Throwable error) {
-            encoded.release();
-            msg.release();
-            promise.tryFailure(error);
-            ctx.fireExceptionCaught(error);
-            return;
-        }
-        msg.release();
-        if (encoded.isReadable()) {
-            ctx.write(encoded, promise);
-            ctx.flush();
-        } else {
-            encoded.release();
-            promise.trySuccess();
-        }
+        pendingWrites.addLast(new PendingWrite(msg, promise, bytes));
+        pendingBytes += bytes;
+        drainCompressionQueue(ctx);
     }
 
-    @Override
-    public void channelInactive(io.netty.channel.ChannelHandlerContext ctx) throws Exception {
-        LOGGER.debug("encoder channelInactive");
-        closed = true;
-        closePersistentStreamQuietly();
-        super.channelInactive(ctx);
+    static boolean queueWithinLimits(int packetCount, long queuedBytes, int newMessageBytes) {
+        return packetCount < MAX_PENDING_PACKETS && newMessageBytes >= 0
+            && queuedBytes + newMessageBytes <= MAX_PENDING_BYTES;
+    }
+
+    private void drainCompressionQueue(io.netty.channel.ChannelHandlerContext ctx) {
+        if (compressionActive || pendingWrites.isEmpty() || !ctx.channel().isActive()) return;
+        PendingWrite pending = pendingWrites.removeFirst();
+        compressionActive = true;
+        try {
+            COMPRESSORS.execute(() -> {
+                ByteBuf encoded = ctx.alloc().buffer();
+                Throwable failure = null;
+                try {
+                    encode(ctx, pending.message(), encoded);
+                } catch (Throwable error) {
+                    failure = error;
+                }
+                Throwable result = failure;
+                ctx.executor().execute(() -> {
+                    pending.message().release();
+                    pendingBytes -= pending.bytes();
+                    compressionActive = false;
+                    if (closeWhenIdle) closePersistentStreamQuietly();
+                    if (result != null || !ctx.channel().isActive()) {
+                        encoded.release();
+                        pending.promise().tryFailure(result == null
+                            ? new IllegalStateException("channel closed during compression") : result);
+                        if (result != null) ctx.fireExceptionCaught(result);
+                    } else if (encoded.isReadable()) {
+                        ctx.write(encoded, pending.promise());
+                        ctx.flush();
+                    } else {
+                        encoded.release();
+                        pending.promise().trySuccess();
+                    }
+                    drainCompressionQueue(ctx);
+                });
+            });
+        } catch (RuntimeException rejected) {
+            pending.message().release();
+            pendingBytes -= pending.bytes();
+            compressionActive = false;
+            pending.promise().tryFailure(rejected);
+            ctx.close();
+        }
     }
 
     private void encode(io.netty.channel.ChannelHandlerContext ctx, ByteBuf msg, ByteBuf out) throws Exception {
@@ -113,12 +153,11 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
             streamHeaderSent = true;
         }
         if (dictionarySession != null) {
-            boolean wroteControl;
-            while (true) {
-                var before = out.writerIndex();
-                wroteControl = dictionarySession.writeOutboundControl(out);
-                if (!wroteControl) break;
-                wireBytes += out.writerIndex() - before;
+            byte[] control;
+            while ((control = dictionarySession.pollOutboundControl()) != null) {
+                var record = controlRecord(control);
+                out.writeBytes(record);
+                wireBytes += record.length;
             }
         }
         if (readable == 0) {
@@ -132,9 +171,9 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
         var currentLevel = Math.clamp(level.getAsInt(), 1, 22);
         if (persistentStream == null || persistentDictionaryId != dictionaryId || persistentLevel != currentLevel) {
             if (persistentStream != null && dictionarySession != null) {
-                var before = out.writerIndex();
-                ZstdDictionarySession.writeStreamResetControl(out);
-                wireBytes += out.writerIndex() - before;
+                var reset = controlRecord(ZstdDictionarySession.streamResetControl());
+                out.writeBytes(reset);
+                wireBytes += reset.length;
             }
             if (persistentStream != null) persistentStream.close();
             persistentStream = new ZstdPersistentStreamCodec(currentLevel, dictionary);
@@ -160,8 +199,14 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
 
     @Override
     public void handlerRemoved(io.netty.channel.ChannelHandlerContext ctx) throws Exception {
-        closed = true;
-        closePersistentStreamQuietly();
+        while (!pendingWrites.isEmpty()) {
+            var pending = pendingWrites.removeFirst();
+            pending.message().release();
+            pendingBytes -= pending.bytes();
+            pending.promise().tryFailure(new IllegalStateException("ZstdNet encoder removed"));
+        }
+        if (compressionActive) closeWhenIdle = true;
+        else closePersistentStream();
         super.handlerRemoved(ctx);
     }
 
@@ -180,6 +225,14 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
         }
     }
 
+    private static byte[] controlRecord(byte[] control) throws java.io.IOException {
+        var out = new java.io.ByteArrayOutputStream(control.length + 10);
+        out.write(VarIntCodec.encode(0));
+        out.write(VarIntCodec.encode(control.length << 1));
+        out.write(control);
+        return out.toByteArray();
+    }
+
     private static void writeVarInt(io.netty.buffer.ByteBuf out, int value) {
         var remaining = value;
         do {
@@ -189,4 +242,6 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
             out.writeByte(next);
         } while (remaining != 0);
     }
+
+    private record PendingWrite(ByteBuf message, ChannelPromise promise, int bytes) {}
 }

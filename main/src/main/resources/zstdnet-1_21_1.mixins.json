@@ -1,0 +1,8 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "mys.zstdnet.reborn.neoforge.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": ["ExportCopyFeedbackMixin"],
+  "injectors": { "defaultRequire": 1 }
+}

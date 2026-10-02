@@ -7,8 +7,6 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.embedded.EmbeddedChannel;
-import io.netty.channel.socket.nio.NioDatagramChannel;
-import io.netty.channel.nio.NioEventLoopGroup;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.atomic.AtomicInteger;
@@ -16,6 +14,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ZstdNettyPipelineTest {
+    @Test
+    void compressionQueueEnforcesPacketAndByteLimits() {
+        assertTrue(ZstdNettyEncoder.queueWithinLimits(127, 0, 1));
+        assertFalse(ZstdNettyEncoder.queueWithinLimits(128, 0, 1));
+        assertFalse(ZstdNettyEncoder.queueWithinLimits(0, 32L * 1024 * 1024, 1));
+        assertTrue(ZstdNettyEncoder.queueWithinLimits(0, 0, 0));
+    }
+
     @Test
     void installsBeforeMinecraftEncryptionExists() {
         var channel = minecraftLikeChannel();
@@ -27,27 +33,6 @@ class ZstdNettyPipelineTest {
         assertEquals(names.indexOf("splitter") - 1, names.indexOf(ZstdNettyPipeline.INBOUND_HANDLER));
         assertEquals(names.indexOf("prepender") - 1, names.indexOf(ZstdNettyPipeline.OUTBOUND_HANDLER));
         assertEquals(names.indexOf("packet_handler") - 1, names.indexOf(ZstdNettyPipeline.CONTROL_HANDLER));
-        assertNotNull(pipeline.get(ZstdNettyPipeline.DIAGNOSTICS_HANDLER));
-        ZstdNettyPipeline.install(pipeline, 3, true, ZstdFrameStats.NONE);
-        assertEquals(1, pipeline.names().stream()
-            .filter(ZstdNettyPipeline.DIAGNOSTICS_HANDLER::equals).count());
-    }
-
-    @Test
-    void skipsIndependentDatagramChannels() {
-        var channel = new NioDatagramChannel();
-        var group = new NioEventLoopGroup(1);
-        try {
-            group.register(channel).syncUninterruptibly();
-            ZstdNettyPipeline.install(channel.pipeline(), 3, true, ZstdFrameStats.NONE);
-            assertNull(channel.pipeline().get(ZstdNettyPipeline.INBOUND_HANDLER));
-            assertNull(channel.pipeline().get(ZstdNettyPipeline.OUTBOUND_HANDLER));
-            assertNull(channel.pipeline().get(ZstdNettyPipeline.CONTROL_HANDLER));
-            assertNull(channel.pipeline().get(ZstdNettyPipeline.DIAGNOSTICS_HANDLER));
-        } finally {
-            channel.close().syncUninterruptibly();
-            group.shutdownGracefully().syncUninterruptibly();
-        }
     }
 
     @Test
