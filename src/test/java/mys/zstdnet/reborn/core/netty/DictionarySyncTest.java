@@ -106,6 +106,36 @@ class DictionarySyncTest {
         assertNotNull(client.activeInboundDictionary());
     }
 
+    @Test void mismatchedClientDictionaryFallsBackToUncompressedUplink() throws Exception {
+        var serverDictionary = DictionaryFixtures.dictionary();
+        var clientDictionary = DictionaryFixtures.dictionary();
+        // A server without an inbound dictionary exercises the rejection protocol.
+        var rejectingServer = ZstdDictionarySession.server(serverDictionary, null, null);
+        var retry = ZstdDictionarySession.client((id, bytes) -> ZstdDictionary.fromBytes(bytes), null, clientDictionary);
+        // Complete the server's own downlink offer first; the following control
+        // record must then be the ACK for the rejected client offer.
+        var downlink = pollControl(rejectingServer);
+        downlink.release();
+        var retryOffer = pollControl(retry);
+        try {
+            rejectingServer.receiveControl(retryOffer);
+        } finally {
+            retryOffer.release();
+        }
+        var rejection = Unpooled.buffer();
+        assertTrue(rejectingServer.writeOutboundControl(rejection));
+        assertEquals(0, readVarInt(rejection));
+        var storedTag = readVarInt(rejection);
+        var payload = rejection.readRetainedSlice(storedTag >>> 1);
+        rejection.release();
+        try {
+            retry.receiveControl(payload);
+            assertNull(retry.activeOutboundDictionary());
+        } finally {
+            payload.release();
+        }
+    }
+
     private static EmbeddedChannel channel(ZstdDictionarySession session) {
         var channel = new EmbeddedChannel();
         channel.pipeline().addLast(ZstdNettyPipeline.OUTBOUND_HANDLER, new ZstdNettyEncoder(3, false, null, session));

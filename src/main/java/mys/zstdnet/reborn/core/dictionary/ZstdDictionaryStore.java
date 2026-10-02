@@ -90,7 +90,13 @@ public final class ZstdDictionaryStore {
     public synchronized java.util.List<String> expireNames(long now) throws IOException {
         var applied = new java.util.ArrayList<String>();
         for (String file : pendingNames()) {
-            var deadline = Long.parseLong(pending.getProperty(file));
+            long deadline;
+            try {
+                deadline = Long.parseLong(pending.getProperty(file));
+            } catch (NumberFormatException e) {
+                logger.warn("Ignoring dictionary naming entry with invalid deadline: " + file);
+                continue;
+            }
             if (deadline > 0 && now >= deadline) {
                 applied.add(name(file, "untitled_" + timestamp()).getFileName().toString());
             }

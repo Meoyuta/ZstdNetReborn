@@ -99,6 +99,20 @@ public final class ZstdNettyDecoder extends ByteToMessageDecoder {
                 return;
             }
 
+            if (storedTag == 0) {
+                var raw = ctx.alloc().buffer(rawLength, rawLength);
+                try {
+                    raw.writeBytes(in, rawLength);
+                } catch (Throwable error) {
+                    raw.release();
+                    throw error;
+                }
+                stats.inbound(rawLength, in.readerIndex() - frameStart);
+                stats.inboundSample(raw);
+                out.add(raw);
+                continue;
+            }
+
             var payload = in.readRetainedSlice(payloadLength);
             var usesDictionary = storedTag != 0 && (storedTag & 1) == 1;
             mys.zstdnet.reborn.core.dictionary.ZstdDictionary dictionary = dictionarySession == null

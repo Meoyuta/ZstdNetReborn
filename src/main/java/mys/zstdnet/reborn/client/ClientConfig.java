@@ -29,9 +29,11 @@ public final class ClientConfig {
             } catch (IOException ignored) {
             }
         } else {
-            props.setProperty("enabled", "true");
+            // Do not alter connections to arbitrary servers before capability
+            // negotiation exists; users opt in through an explicit whitelist.
+            props.setProperty("enabled", "false");
             props.setProperty("compression-level", "9");
-            props.setProperty("servers", "*");
+            props.setProperty("servers", "");
             try {
                 Files.createDirectories(configDir);
                 try (var out = Files.newOutputStream(path)) {
@@ -41,14 +43,14 @@ public final class ClientConfig {
             }
         }
 
-        var servers = Arrays.stream(props.getProperty("servers", "*").split(","))
+        var servers = Arrays.stream(props.getProperty("servers", "").split(","))
             .map(String::trim)
             .filter(s -> !s.isEmpty())
             .map(s -> s.toLowerCase(Locale.ROOT))
             .collect(Collectors.toUnmodifiableSet());
 
         var level = parseInt(props.getProperty("compression-level"));
-        return new ClientConfig(Boolean.parseBoolean(props.getProperty("enabled", "true")), level, servers);
+        return new ClientConfig(Boolean.parseBoolean(props.getProperty("enabled", "false")), level, servers);
     }
 
     public boolean enabledFor(String host, int port) {

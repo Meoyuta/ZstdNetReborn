@@ -164,7 +164,7 @@ public final class CompressionBenchmark implements AutoCloseable {
     }
 
     public void tick() {
-        if (scheduledEnabled && automatic && System.currentTimeMillis() >= nextRunAt) request(true);
+        if (scheduledEnabled && System.currentTimeMillis() >= nextRunAt) request(true);
     }
 
     public boolean start() {
