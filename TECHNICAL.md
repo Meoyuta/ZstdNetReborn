@@ -20,13 +20,13 @@ A connection is processed in the following order:
 1. The client intercepts Minecraft's connection entry point and obtains the target host and port.
 2. The client performs the ZstdNet protocol probe on a background thread; the probe does not block the game thread.
 3. After a successful probe, the client stores one pending-installation record for that host and port.
-4. After Minecraft creates the actual TCP Connection, ZstdNet reads the pending-installation record when the pipeline is configured.
+4. After Minecraft creates the actual TCP Connection, ZstdNet reads the pending-installation record from `channelActive`; if probing is still in flight, installation retries briefly on the connection event loop.
 5. The client installs the ZstdNet codecs and repositions them after the encryption pipeline is established.
 6. The server receives child connections on Minecraft's ServerChannel and first determines whether each connection is a protocol probe, a ZstdNet handshake, or ordinary Minecraft traffic.
 7. After both sides confirm the protocol version, data is transferred over a persistent Zstandard stream on the same TCP byte stream.
 8. When the connection closes, the compression streams, decompression executor, dictionary session, and connection-level statistics are released.
 
-The compression pipeline is installed only when the protocol probe succeeds. If probing fails, times out, or returns a mismatched protocol version, the current connection immediately continues with the ordinary protocol without ZstdNet. Client and server must use the same current build; there is no local client-level override.
+The compression pipeline is installed only when the protocol probe succeeds. If probing fails, times out, or returns a mismatched protocol version, the current connection remains ordinary; a server in its default strict mode then rejects a RAW login, while a server explicitly configured for fallback may accept it. Client and server must use the same current build; there is no local client-level override.
 
 ## 3. Client Configuration and Connection Preparation
 
@@ -40,15 +40,15 @@ The client has no manually selected compression-level setting. Its outbound leve
 
 When there is no valid probe result in the cache, the following actions are performed:
 
-- Remove any existing pending-installation record for the address.
-- Wait for the probe for at most 300 ms; if it does not complete successfully, keep the background probe running.
-- Continue the current Minecraft connection using the ordinary protocol when the probe fails or times out.
+- Start or join the asynchronous probe and keep the connection preparation non-blocking.
+- Wait for the result in the background for the three-second socket timeout plus a 500 ms installation window.
+- If the probe fails or times out, leave the connection ordinary; the server's `require_zstd_client` policy determines whether RAW login is accepted.
 
 When the cached result indicates support, the connection-preparation queue stores the host, port, client compression level, and a 15-second expiration time. At most eight pending-installation records are retained for one address; expired records are cleaned up by a new preparation request.
 
 ### 3.3 Installation on the Actual TCP Pipeline
 
-`ConnectionMixin` invokes the installation logic after Minecraft finishes `configurePacketHandler`. The installation logic accepts only TCP `InetSocketAddress` connections. ZstdNet is not installed on:
+`ConnectionMixin` invokes the installation logic from `channelActive`. The installation logic accepts only TCP `InetSocketAddress` connections. ZstdNet is not installed on:
 
 - Sable-specific UDP pipelines.
 - Other `DatagramChannel` instances.
@@ -85,9 +85,9 @@ The response is exactly 6 bytes: a fixed prefix followed by the server-selected 
 
 `ProtocolProbe` performs probes using a daemon executor. The probe parameters are:
 
-- TCP connection timeout: 1 second.
-- Socket read timeout: 1 second.
-- Additional future timeout: approximately 1.25 seconds.
+- TCP connection timeout: 3 seconds.
+- Socket read timeout: 3 seconds.
+- Additional future timeout: 3.5 seconds.
 - Successful-result cache: 5 minutes.
 - Failed-result cache: 30 seconds.
 - Concurrent probes for the same host and port are merged through `IN_FLIGHT`.
@@ -138,8 +138,8 @@ Detection proceeds as follows:
 1. If a protocol-probe magic is received, return the fixed response and close the connection. This path is not rate-limited.
 2. If a Zstd frame magic is received, perform rate-limit admission, read the stream header, and install ZstdNet.
 3. For ordinary traffic, check whether it is a vanilla login packet:
-   - Login traffic receives the configured server rejection packet and the connection is closed.
-   - Other ordinary traffic enters RAW pass-through mode.
+   - In strict mode, login traffic receives the configured server rejection packet and the connection is closed.
+   - When `require_zstd_client=false`, login traffic and other ordinary traffic enter RAW pass-through mode.
 4. A connection that has not completed detection is closed after 10 seconds to prevent half-open connections from permanently consuming resources.
 
 After entering ZSTD mode, the server creates directional dictionary sessions, installs the codecs, removes the vanilla compression-negotiation handlers, and immediately sends any pending dictionary control frames.
@@ -182,6 +182,12 @@ A control frame uses `rawLength == 0`, with the payload encoded as a control rec
 - Persistent-stream resets.
 
 Control frames and data frames share the same outbound FIFO, ensuring that a control record arrives before the data it governs. When a control record requires a response, the decoder sends the acknowledgement from the encoder context instead of passing through Minecraft's packet encoder and length prepender.
+
+> [!IMPORTANT]
+> ### Connection negotiation and pipeline installation
+> The client starts asynchronous protocol probing from `ServerAddress.getHost()`. Socket connect/read timeouts are three seconds and results are cached. The Netty connection enters `channelActive` before the ZstdNet codec pipeline is installed; while probing is still in flight, the connection event loop retries every 100 ms until the negotiation window expires. Installation checks for existing handlers, so repeated callbacks during protocol transitions remain idempotent.
+> Pending connection records are always keyed from the `ServerAddress` host string and port. Installation consumes an existing pending record by port instead of rebuilding a key from Netty, avoiding IPv6 bracket and reverse-DNS differences.
+> The server option `require_zstd_client` defaults to `true`. A RAW login receives the rejection packet in strict mode; RAW data is passed through only when the option is explicitly set to `false`.
 
 ## 8. Outbound Compression and Batching
 

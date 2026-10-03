@@ -20,13 +20,13 @@ ZstdNet 可分为四层：
 1. 客户端拦截 Minecraft 的连接入口,取得目标主机和端口
 2. 客户端在后台线程执行 ZstdNet 协议探测；_探测不会阻塞游戏线程_
 3. 探测成功后,客户端为同一 host:port 保存一次待安装连接记录
-4. Minecraft 创建真正的 TCP Connection 后,ZstdNet 在管线配置完成时读取待安装记录
+4. Minecraft 创建真正的 TCP Connection 后，ZstdNet 在 `channelActive` 阶段读取待安装记录；若探测仍在进行，则在连接 event loop 上短暂重试安装
 5. 客户端安装 ZstdNet 编解码器,并在加密管线建立后重新定位编解码器
 6. 服务端在 Minecraft 的 ServerChannel 上接收子连接,先识别探测当前连接是 ZstdNet 握手还是普通 Minecraft 流量
 7. 双方确认协议版本后,使用同一条 TCP 字节流上的持久 Zstandard 流传输数据
 8. 连接关闭时释放压缩流,解压 executor、字典会话和连接级统计状态
 
-是否安装压缩管线完全由探测结果决定。探测失败、超时或响应版本不匹配时,当前连接直接使用普通协议。客户端和服务端必须使用当前相同构建版本，不提供本地客户端等级覆盖
+是否安装压缩管线完全由探测结果决定。探测失败、超时或响应版本不匹配时，当前连接保持普通协议；服务端默认强制模式会拒绝 RAW login，只有显式开启回落时才会接受。客户端和服务端必须使用当前相同构建版本
 
 ## 3. 客户端配置与连接准备
 
@@ -40,15 +40,15 @@ ConnectScreenMixin 在 ConnectScreen.startConnecting 入口调用 ZstdNetConnect
 
 若当缓存中没有有效的探测结果时,则会做以下操作：
 
-- 删除该地址已有的待安装记录
-- 最多等待探测 300 ms；若未成功完成则启动或保留后台探测
-- 探测失败或超时时，当前 Minecraft 连接按普通协议继续
+- 启动或加入异步探测，连接准备过程不阻塞
+- 按 3 秒 socket 超时加 500 ms 安装窗口等待后台结果
+- 探测失败或超时时保持普通连接；是否接受 RAW login 由服务端 `require_zstd_client` 决定 （默认为 true，即强制要求zstd客户端）
 
 当缓存结果为支持时,连接准备队列写入主机、端口、客户端压缩等级和 15 秒过期时间；同一地址最多保留 8 条待安装记录,过期记录会在新的准备请求中清理
 
-### 3.3 真正的 TCP 管线的安装
+### 3.3 TCP 管线的安装
 
-ConnectionMixin 在 Minecraft configurePacketHandler 完成后调用安装逻辑。安装逻辑只接受 TCP InetSocketAddress,以下管线不会安装 ZstdNet：
+ConnectionMixin 在 Minecraft `channelActive` 阶段调用安装逻辑。安装逻辑只接受 TCP InetSocketAddress,以下管线不会安装 ZstdNet：
 
 - Sable 专用 UDP 管线
 - 其他 DatagramChannel
@@ -85,9 +85,9 @@ ConnectionMixin 在 Minecraft configurePacketHandler 完成后调用安装逻辑
 
 ProtocolProbe 使用 daemon executor 执行探测,下列是探测相关的参数：
 
-- TCP 连接超时：1 秒
-- socket 读取超时：1 秒
-- future 额外超时：约 1.25 秒
+- TCP 连接超时：3 秒
+- socket 读取超时：3 秒
+- future 额外超时：3.5 秒
 - 成功结果缓存：5 分钟
 - 失败结果缓存：30 秒
 - 同一 host:port 的并发探测通过 IN_FLIGHT 合并
@@ -108,7 +108,7 @@ ProtocolProbe 使用 daemon executor 执行探测,下列是探测相关的参数
 6. 遍历channels,排除 DatagramChannel,只向 TCP ServerChannel 添加接受器
 7. 记录注入状态并开始接受连接
 
-注入失败、找不到 ServerChannel 或 Accessor 读取失败时,服务端将保持 vanilla 网络.
+注入失败、找不到 ServerChannel 或 Accessor 读取失败时,服务端将保持 vanilla 网络
 
 ### 5.2 Mixin Accessor
 
@@ -138,8 +138,8 @@ SamePortZstdHandler 有三个内部模式：
 1. 如果收到协议探测魔数,返回固定响应并关闭连接；该路径不进入限流
 2. 如果收到 Zstd frame magic,执行限流准入,读取流头并安装 ZstdNet
 3. 如果是普通流量,检查是否为原版 login 包：
-   - login 流量按服务端配置返回拒绝包并关闭
-   - 其他普通流量进入 RAW 透传
+   - 强制模式（`require_zstd_client=true`）下 login 流量按服务端配置返回拒绝包并关闭
+   - 兼容模式（`require_zstd_client=false`） 下 login 流量及其他普通流量进入 RAW 透传
 4. 未完成判定的连接在 10 秒后关闭,避免半连接永久占用资源
 
 进入 ZSTD 模式后,服务端创建方向性的字典会话、安装编解码器、移除原版压缩协商 handler,并立即发送待处理的字典控制帧（若有字典）
@@ -182,6 +182,12 @@ ZstdNet 数据流首先发送 4 字节 Zstandard magic：
 - 持久流 reset
 
 控制帧和数据帧共享同一出站 FIFO,保证控制记录在对应数据之前到达。收到需要回复的控制记录时,decoder 从 encoder context 发送确认,不会经过 Minecraft 的 packet encoder 和 length prepender
+
+> [!IMPORTANT]
+> ### 连接协商与管线安装
+> 客户端从 `ServerAddress.getHost()` 启动异步协议探测。探测使用 3 秒连接/读取超时，并缓存结果。Netty 连接进入 `channelActive` 后才安装 ZstdNet 编解码管线；若探测仍在进行，连接级事件循环每 100 ms 重试一次，直到探测窗口结束。安装操作检查已有 handler，因此在协议切换或重复回调时保持幂等。
+> pending 连接记录始终以 `ServerAddress` 的 host 字符串和端口建立，安装时只消费按端口扫描到的已有记录，而不是从 Netty 反向生成 host key，从而避免 IPv6 方括号和反解名称之间有差异的问题。
+> 服务端配置 `require_zstd_client` 默认值为 `true`。收到 RAW login 时，强制模式发送拒绝包；仅显式关闭该选项时才移除协议处理器并透传 RAW 数据。
 
 ## 8. 出站压缩和批量
 

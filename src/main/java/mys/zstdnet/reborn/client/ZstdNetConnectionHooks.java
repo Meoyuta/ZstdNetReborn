@@ -7,6 +7,7 @@ import mys.zstdnet.reborn.neoforge.helper.SableCompat;
 import mys.zstdnet.reborn.neoforge.network.ZstdState;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.socket.DatagramChannel;
+import io.netty.util.AttributeKey;
 
 import java.util.Locale;
 import java.net.InetSocketAddress;
@@ -15,9 +16,11 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.Map;
 
 public final class ZstdNetConnectionHooks {
+    static final long PROBE_WAIT_MILLIS = ProtocolProbe.TIMEOUT_MILLIS + 500L;
     private static final long PENDING_CONNECT_TTL_MS = 15_000L;
     private static final Map<String, ConcurrentLinkedQueue<PendingConnection>> PENDING = new ConcurrentHashMap<>();
     private static final int MAX_PENDING_PER_KEY = 8;
+    private static final AttributeKey<Long> RETRY_DEADLINE = AttributeKey.valueOf("zstdnet-install-deadline");
     private static volatile ZstdState lastState = ZstdState.SERVER_DISABLED;
 
     private ZstdNetConnectionHooks() {
@@ -31,32 +34,23 @@ public final class ZstdNetConnectionHooks {
         }
 
         var protocol = ProtocolProbe.cached(host, port);
-        if (protocol == null) {
-            protocol = ProtocolProbe.awaitResult(host, port, 300L);
+        if (protocol != null) {
+            return protocol.supported() && protocol.serverLevel() >= 1
+                && enqueuePending(host, port, protocol);
         }
-        if (protocol == null || !protocol.supported() || protocol.serverLevel() < 1) {
-            PENDING.remove(key(host, port));
-            ProtocolProbe.start(host, port);
+        ZstdNetClient.logger().info("Negotiating ZstdNet compression protocol for " + host + ":" + port);
+        ProtocolProbe.probeAsync(host, port).thenAccept(result -> {
+            if (result != null && result.supported() && result.serverLevel() >= 1) {
+                enqueuePending(host, port, result);
+                return;
+            }
             lastState = ZstdState.PROBE_FAILED;
             ZstdNetClient.logger().info("ZstdNet protocol probe failed or timed out for "
                 + host + ":" + port + "; using the ordinary protocol (no compression for this connection)");
-            ZstdNetClient.logger().debug("ZstdNet protocol probe pending or failed; using ordinary connection for "
+            ZstdNetClient.logger().warn("ZstdNet protocol probe failed or timed out; connection remains uncompressed for "
                 + host + ":" + port);
-            return false;
-        }
-
-        var pending = new PendingConnection(
-            host.toLowerCase(Locale.ROOT),
-            port,
-            protocol.serverLevel(),
-            System.currentTimeMillis() + PENDING_CONNECT_TTL_MS
-        );
-        var queue = PENDING.computeIfAbsent(key(host, port), ignored -> new ConcurrentLinkedQueue<>());
-        while (queue.size() >= MAX_PENDING_PER_KEY) queue.poll();
-        queue.add(pending);
-        ZstdNetClient.logger().info("prepared ZstdNet pipeline for " + host + ":" + port);
-        lastState = ZstdState.ACTIVE;
-        return true;
+        });
+        return false;
     }
 
     public static ZstdState lastState() {
@@ -64,6 +58,10 @@ public final class ZstdNetConnectionHooks {
     }
 
     public static void install(ChannelPipeline pipeline) {
+        install(pipeline, false);
+    }
+
+    private static void install(ChannelPipeline pipeline, boolean retry) {
         ZstdNetClient.logger().debug("install requested: channel="
             + (pipeline == null ? "null" : pipeline.channel().getClass().getName())
             + ", names=" + (pipeline == null ? "[]" : pipeline.names()));
@@ -76,14 +74,30 @@ public final class ZstdNetConnectionHooks {
                 + (pipeline != null ? pipeline.names() : "null"));
             return;
         }
-        var remote = pipeline.channel().remoteAddress();
-        if (!(remote instanceof InetSocketAddress address)) {
-            ZstdNetClient.logger().debug("install skipped: TCP remote address unavailable");
+        if (!pipeline.channel().isActive() || !(pipeline.channel().remoteAddress() instanceof InetSocketAddress address)) {
+            ZstdNetClient.logger().warn("install deferred: TCP remote address unavailable, open="
+                + pipeline.channel().isOpen() + ", active=" + pipeline.channel().isActive());
             return;
         }
-        var pending = pollPending(address.getHostString(), address.getPort());
+        if (pipeline.get(ZstdNettyPipeline.INBOUND_HANDLER) != null) {
+            ZstdNetClient.logger().debug("install skipped: ZstdNet pipeline already installed");
+            return;
+        }
+        var pending = pollPendingByPort(address.getPort());
         if (pending == null) {
-            ZstdNetClient.logger().debug("install skipped: no live pending TCP connection");
+            if (!retry) {
+                var deadline = System.currentTimeMillis() + PROBE_WAIT_MILLIS;
+                pipeline.channel().attr(RETRY_DEADLINE).set(deadline);
+                scheduleInstallRetry(pipeline, deadline);
+            } else {
+                var deadline = pipeline.channel().attr(RETRY_DEADLINE).get();
+                if (deadline != null && System.currentTimeMillis() < deadline) {
+                    scheduleInstallRetry(pipeline, deadline);
+                    return;
+                }
+                pipeline.channel().attr(RETRY_DEADLINE).set(null);
+            }
+            ZstdNetClient.logger().info("install skipped: no live pending TCP connection for port " + address.getPort());
             return;
         }
 
@@ -98,6 +112,27 @@ public final class ZstdNetConnectionHooks {
         );
         ZstdNetClient.logger().info("installed ZstdNet pipeline for " + pending.host() + ":" + pending.port());
         ZstdNetClient.logger().debug("TCP pipeline installed: " + pipeline.names());
+        pipeline.channel().attr(RETRY_DEADLINE).set(null);
+    }
+
+    private static void scheduleInstallRetry(ChannelPipeline pipeline, long deadline) {
+        pipeline.channel().eventLoop().schedule(() -> {
+            if (pipeline.channel().isActive() && pipeline.get(ZstdNettyPipeline.INBOUND_HANDLER) == null) {
+                install(pipeline, true);
+            }
+        }, 100L, java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
+    private static boolean enqueuePending(String host, int port, ProtocolProbe.ProbeResult protocol) {
+        var pending = new PendingConnection(
+            host.toLowerCase(Locale.ROOT), port, protocol.serverLevel(),
+            System.currentTimeMillis() + PENDING_CONNECT_TTL_MS);
+        var queue = PENDING.computeIfAbsent(key(host, port), ignored -> new ConcurrentLinkedQueue<>());
+        while (queue.size() >= MAX_PENDING_PER_KEY) queue.poll();
+        queue.add(pending);
+        ZstdNetClient.logger().info("prepared ZstdNet pipeline for " + host + ":" + port);
+        lastState = ZstdState.ACTIVE;
+        return true;
     }
 
     public static void reposition(ChannelPipeline pipeline) {
@@ -123,17 +158,19 @@ public final class ZstdNetConnectionHooks {
     }
 
     private static String key(String host, int port) {
-        return host.toLowerCase(Locale.ROOT) + ":" + port;
+        return ProtocolProbe.normalizeHost(host) + ":" + port;
     }
 
-    private static PendingConnection pollPending(String host, int port) {
-        var queue = PENDING.get(key(host, port));
-        if (queue == null) return null;
-        PendingConnection pending;
-        while ((pending = queue.poll()) != null) {
-            if (!pending.expired()) return pending;
+    private static PendingConnection pollPendingByPort(int port) {
+        for (var entry : PENDING.entrySet()) {
+            var queue = entry.getValue();
+            PendingConnection pending;
+            int scan = queue.size();
+            while (scan-- > 0 && (pending = queue.poll()) != null) {
+                if (pending.port() == port && !pending.expired()) return pending;
+                if (!pending.expired()) queue.offer(pending);
+            }
         }
-        PENDING.remove(key(host, port), queue);
         return null;
     }
 

@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.TimeUnit;
 
 final class ProtocolProbe {
-    private static final int TIMEOUT_MILLIS = 1_000;
+    static final int TIMEOUT_MILLIS = 3_000;
     private static final long SUCCESS_TTL_MILLIS = 5 * 60_000L;
     private static final long FAILURE_TTL_MILLIS = 30_000L;
     private static final AtomicInteger THREAD_ID = new AtomicInteger();
@@ -39,6 +39,10 @@ final class ProtocolProbe {
 
     static void start(String host, int port) {
         request(host, port);
+    }
+
+    static CompletableFuture<ProbeResult> probeAsync(String host, int port) {
+        return request(host, port);
     }
 
     static void clearForTests() {
@@ -64,7 +68,7 @@ final class ProtocolProbe {
             CompletableFuture<ProbeResult> future;
             try {
                 future = CompletableFuture.supplyAsync(() -> probe(host, port), EXECUTOR)
-                    .orTimeout(TIMEOUT_MILLIS + 250L, TimeUnit.MILLISECONDS)
+                    .orTimeout(TIMEOUT_MILLIS + 500L, TimeUnit.MILLISECONDS)
                     .exceptionally(error -> ProbeResult.unsupported());
             } catch (RejectedExecutionException rejected) {
                 future = CompletableFuture.completedFuture(ProbeResult.unsupported());
@@ -100,7 +104,16 @@ final class ProtocolProbe {
     }
 
     private static String key(String host, int port) {
-        return host.toLowerCase(java.util.Locale.ROOT) + ":" + port;
+        return normalizeHost(host) + ":" + port;
+    }
+
+    static String normalizeHost(String host) {
+        if (host == null) return "";
+        var value = host.trim();
+        if (value.length() > 1 && value.charAt(0) == '[' && value.charAt(value.length() - 1) == ']') {
+            value = value.substring(1, value.length() - 1);
+        }
+        return value.toLowerCase(java.util.Locale.ROOT);
     }
 
     record ProbeResult(boolean supported, int serverLevel) {

@@ -140,6 +140,13 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
             return;
         }
         if (rawLogin) {
+            if (!config.requireZstdClient()) {
+                mode = Mode.RAW;
+                logger.info("protocol mode RAW fallback enabled for " + ctx.channel().remoteAddress());
+                if (in.isReadable()) out.add(in.readRetainedSlice(in.readableBytes()));
+                ctx.pipeline().remove(this);
+                return;
+            }
             logger.debug("protocol mode rejected RAW login remote=" + ctx.channel().remoteAddress());
             logger.warn("rejected raw login from " + ctx.channel().remoteAddress());
             in.skipBytes(in.readableBytes());

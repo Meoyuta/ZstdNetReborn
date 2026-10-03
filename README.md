@@ -5,7 +5,7 @@ ZstdNet is an optimization mod that adds Zstandard (Zstd) compression to Minecra
 ## Requirements
 
 - Minecraft 1.21.1
-- NeoForge 21.1.223
+- NeoForge 21.1.x
 - Java 21
 
 ## Build
@@ -14,7 +14,7 @@ Run `bash ./build.sh` from this directory. The script builds the client and serv
 
 The build script copies the built mod artifact to `target/ZstdNet-1.21.1-neoforge-server-client-<version>.jar`. Install the same build on the server and every client that connects to it. This mod is still under development, and the updated protocol is incompatible with older versions, so keep the client and server versions synchronized.
 
-After ZstdNet is installed on the client, every server must first pass the ZstdNet protocol probe. Ordinary servers continue to use the plain protocol when probing fails; **the current version does not support integrated servers (this mod's features cannot be used in multiplayer/LAN play)**
+After ZstdNet is installed on the client, every server is automatically checked with the ZstdNet protocol probe. A server in the default strict mode rejects a RAW login when probing fails; only a server with `require_zstd_client=false` accepts plaintext fallback. **The current version does not support integrated servers (this mod's features cannot be used in multiplayer/LAN play).**
 
 The server startup log should contain `ZstdNet transport upgrade: ACTIVE`. `DISABLED (reason=...)` means ZstdNet is not working normally and has retained vanilla networking; `reason` identifies why it is not working, such as missing server channels, an unapplied accessor mixin, or an injection exception.
 

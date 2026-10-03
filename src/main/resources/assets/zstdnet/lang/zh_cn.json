@@ -1,4 +1,5 @@
 {
+  "zstdnet.connect.negotiating": "正在协商 ZstdNet 压缩协议……",
   "zstdnet.command.dictionary.name_prompt": "字典 %s 已保存。点击后在一分钟内命名，否则将自动命名为 untitled_yyyyMMdd_HH-mm-ss.SSS 并应用。",
   "zstdnet.command.dictionary.name_temp": "关服字典 %s 等待命名。点击可改名，继续持有原字典实例。",
   "zstdnet.command.dictionary.named": "字典已命名并选用：%s。",

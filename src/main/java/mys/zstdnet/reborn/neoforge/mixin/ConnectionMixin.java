@@ -2,7 +2,7 @@ package mys.zstdnet.reborn.neoforge.mixin;
 
 import mys.zstdnet.reborn.client.ZstdNetConnectionHooks;
 import io.netty.channel.Channel;
-import io.netty.channel.ChannelPipeline;
+import io.netty.channel.ChannelHandlerContext;
 import net.minecraft.network.Connection;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -17,9 +17,9 @@ abstract class ConnectionMixin {
     @Shadow
     private Channel channel;
 
-    @Inject(method = "configurePacketHandler", at = @At("TAIL"))
-    private void zstdnet$installPipeline(ChannelPipeline pipeline, CallbackInfo ci) {
-        ZstdNetConnectionHooks.install(pipeline);
+    @Inject(method = "channelActive", at = @At("TAIL"))
+    private void zstdnet$installPipelineAfterConnect(ChannelHandlerContext ctx, CallbackInfo ci) {
+        ZstdNetConnectionHooks.install(ctx.pipeline());
     }
 
     @Inject(method = "setEncryptionKey", at = @At("TAIL"))

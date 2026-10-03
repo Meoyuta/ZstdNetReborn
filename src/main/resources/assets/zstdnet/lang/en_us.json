@@ -1,4 +1,5 @@
 {
+  "zstdnet.connect.negotiating": "Negotiating ZstdNet compression protocol...",
   "zstdnet.command.dictionary.name_prompt": "Dictionary %s saved. Click to name it within 60 seconds; otherwise it becomes untitled_yyyyMMdd_HH-mm-ss.SSS and is applied.",
   "zstdnet.command.dictionary.name_temp": "Shutdown dictionary %s awaits a name. Click to rename it; the dictionary instance is retained.",
   "zstdnet.command.dictionary.named": "Dictionary named and selected: %s.",

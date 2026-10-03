@@ -14,7 +14,7 @@ ZstdNet 是一个为 Minecraft 1.21.1 的网络连接增加 Zstandard(Zstd) 压�
 
 构建脚本会将构建好的模组产物复制到 `target/ZstdNet-1.21.1-neoforge-server-client-<version>.jar`。服务端及所有参与连接的客户端应安装相同构建版本。因为模组尚处于开发阶段，更新后的协议不兼容旧版本，请保持客户端与服务端版本同步
 
-客户端安装 ZstdNet 后，所有服务器都必须先通过 ZstdNet 探测。普通服务器探测失败时会继续使用明文协议；**当前版本不支持集成服务器（无法在联机中使用此模组的功能）**
+客户端安装 ZstdNet 后，所有服务器都会自动进行 ZstdNet 协议探测。默认强制模式的服务端在探测失败时会拒绝 RAW 登录；只有配置 `require_zstd_client=false` 的服务端才接受明文回落。**当前版本不支持集成服务器（无法在联机中使用此模组的功能）**
 
 服务端启动日志应出现 `ZstdNet transport upgrade: ACTIVE`。如果出现 `DISABLED (reason=...)`，表示 ZstdNet 未正常工作，保留了原版网络；`reason`是未正常工作的原因，如缺少服务端 channel、Accessor Mixin 未应用或注入异常等
 

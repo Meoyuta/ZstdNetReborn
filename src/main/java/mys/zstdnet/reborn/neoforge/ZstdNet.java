@@ -163,10 +163,16 @@ public final class ZstdNet {
             return true;
         }
         var port = server.getPort();
-        var config = ZstdNetConfig.defaults(
+        ZstdNetConfig config;
+        try {
+            config = ZstdNetConfig.load(
+                FMLPaths.CONFIGDIR.get().resolve("zstdnet").resolve("server.properties"),
             new HostPort("0.0.0.0", port),
-            new HostPort("same-port", port)
-        );
+                new HostPort("same-port", port));
+        } catch (IOException error) {
+            LOGGER.error("Could not load ZstdNet server connection policy", error);
+            return false;
+        }
         try {
             dictionaryStore.enableNaming();
         } catch (java.io.IOException e) {
