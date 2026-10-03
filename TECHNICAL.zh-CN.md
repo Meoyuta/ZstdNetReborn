@@ -11,7 +11,7 @@ ZstdNet 可分为四层：
 - neoforge：模组生命周期、服务端同端口注入、客户端 Mixin、命令、管理 payload 和 overlay
 - test：协议、字典、Netty 管线、连接选择和 benchmark 的回归测试
 
-理想的本模组运行环境为 Minecraft 1.21.1、NeoForge 21.1.223 和 Java 25,构建使用Java 21
+理想的本模组运行环境为 Minecraft 1.21.1、NeoForge 21.1.223 和 Java 25，构建使用 Java 21
 
 ## 2. 总体连接流程
 
@@ -350,7 +350,7 @@ CompressionMetrics 使用并发计数器记录：
 
 ZstdNet 只处理 Minecraft TCP。Sable 的 UDP pipeline、独立 DatagramChannel 和非 Minecraft UDP socket 都不会安装 ZstdNet 编解码器。Sable 通过 optional 依赖和运行时管线识别保持可选；ZstdNet 不会静态链接 Sable API
 
-服务端注入器同时使用 Mixin Accessor、ServerChannel 类型筛选和 DatagramChannel 排除,避免把独立 UDP 监听器当作 Minecraft TCP 接受器
+服务端注入器同时使用 Mixin Accessor、ServerChannel 类型筛选和 DatagramChannel 排除,避免把独立 UDP 监听器当作 Minecraft TCP 接受器。Accessor Mixin 未应用时，注入器会记录 `accessor_missing`，输出 `transport upgrade: DISABLED`，并保留原版网络
 
 ## 17. 构建
 

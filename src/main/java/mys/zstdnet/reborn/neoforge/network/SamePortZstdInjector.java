@@ -21,7 +21,7 @@ import java.util.Objects;
 import java.util.function.IntSupplier;
 
 public final class SamePortZstdInjector implements AutoCloseable {
-    public enum InjectState { OK, NO_CHANNELS, EXCEPTION }
+    public enum InjectState { OK, NO_CHANNELS, ACCESSOR_MISSING, EXCEPTION }
     private static volatile InjectState lastState = InjectState.OK;
     private static volatile Throwable lastError;
     private static final String ACCEPT_HANDLER = "zstdnet-accept-injector";
@@ -77,8 +77,16 @@ public final class SamePortZstdInjector implements AutoCloseable {
     public void inject() {
         List<Channel> serverChannels = serverChannels();
         if (serverChannels.isEmpty()) {
-            lastState = InjectState.NO_CHANNELS;
-            logger.warn("ZstdNet could not find Minecraft server Netty channels; keeping vanilla networking");
+            switch (lastState) {
+                case ACCESSOR_MISSING -> logger.error(
+                    "ZstdNet transport upgrade: DISABLED (reason=accessor_missing; keeping vanilla networking)");
+                case EXCEPTION -> logger.error(
+                    "ZstdNet transport upgrade: DISABLED (reason=accessor_exception; keeping vanilla networking)");
+                default -> {
+                    lastState = InjectState.NO_CHANNELS;
+                    logger.warn("ZstdNet transport upgrade: DISABLED (reason=no_server_channels; keeping vanilla networking)");
+                }
+            }
             return;
         }
 
@@ -95,11 +103,12 @@ public final class SamePortZstdInjector implements AutoCloseable {
             lastState = InjectState.EXCEPTION;
             lastError = e;
             close();
+            logger.error("ZstdNet transport upgrade: DISABLED (reason=inject_exception; keeping vanilla networking): " + e);
             throw e;
         }
         lastState = InjectState.OK;
         lastError = null;
-        logger.info("ZstdNet same-port injection active on " + serverChannels.size() + " server channel(s)");
+        logger.info("ZstdNet transport upgrade: ACTIVE (server_channels=" + serverChannels.size() + ")");
     }
 
     public TrafficStats.Snapshot snapshot() {
@@ -118,11 +127,16 @@ public final class SamePortZstdInjector implements AutoCloseable {
         return switch (lastState) {
             case OK -> ZstdState.ACTIVE;
             case NO_CHANNELS, EXCEPTION -> ZstdState.INJECT_FAILED;
+            case ACCESSOR_MISSING -> ZstdState.ACCESSOR_MISSING;
         };
     }
 
     public static ZstdState failureStateOrDisabled() {
-        return lastState == InjectState.OK ? ZstdState.SERVER_DISABLED : ZstdState.INJECT_FAILED;
+        return switch (lastState) {
+            case OK -> ZstdState.SERVER_DISABLED;
+            case ACCESSOR_MISSING -> ZstdState.ACCESSOR_MISSING;
+            case NO_CHANNELS, EXCEPTION -> ZstdState.INJECT_FAILED;
+        };
     }
 
     @Override
@@ -153,9 +167,15 @@ public final class SamePortZstdInjector implements AutoCloseable {
         return channels;
     }
 
-    private static List<ChannelFuture> channelFutures(ServerConnectionListener connectionListener) {
+    private List<ChannelFuture> channelFutures(ServerConnectionListener connectionListener) {
         try {
-            List<ChannelFuture> futures = ((ServerConnectionListenerAccessor) connectionListener).zstdnet$getChannels();
+            if (!(connectionListener instanceof ServerConnectionListenerAccessor accessor)) {
+                lastState = InjectState.ACCESSOR_MISSING;
+                lastError = new IllegalStateException("ServerConnectionListener accessor mixin was not applied");
+                logger.error("ZstdNet transport upgrade: DISABLED (reason=accessor_missing; keeping vanilla networking)");
+                return List.of();
+            }
+            List<ChannelFuture> futures = accessor.zstdnet$getChannels();
             if (futures == null) return List.of();
             synchronized (futures) {
                 return List.copyOf(futures);
@@ -163,6 +183,7 @@ public final class SamePortZstdInjector implements AutoCloseable {
         } catch (RuntimeException error) {
             lastState = InjectState.EXCEPTION;
             lastError = error;
+            logger.error("ZstdNet transport upgrade: DISABLED (reason=accessor_exception; keeping vanilla networking): " + error);
             return List.of();
         }
     }

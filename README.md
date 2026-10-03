@@ -16,6 +16,8 @@ The build script copies the built mod artifact to `target/ZstdNet-1.21.1-neoforg
 
 After ZstdNet is installed on the client, every server must first pass the ZstdNet protocol probe. Ordinary servers continue to use the plain protocol when probing fails; **the current version does not support integrated servers (this mod's features cannot be used in multiplayer/LAN play)**
 
+The server startup log should contain `ZstdNet transport upgrade: ACTIVE`. `DISABLED (reason=...)` means ZstdNet is not working normally and has retained vanilla networking; `reason` identifies why it is not working, such as missing server channels, an unapplied accessor mixin, or an injection exception.
+
 ## Incompatible Mods
 
 The following mods **cannot be installed together** with ZstdNet:

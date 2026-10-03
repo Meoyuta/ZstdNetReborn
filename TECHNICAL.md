@@ -79,7 +79,7 @@ The server returns:
 
     Z N P 0x02 protocolVersion clientLevel
 
-The response is exactly 6 bytes: a fixed prefix followed by the server-selected client compression level (1-22). The client validates every byte and rejects truncated, legacy, or invalid-level responses. Client and server must run the same current build; the probe socket is closed after the complete response is received.
+The response is exactly 6 bytes: a fixed prefix followed by the server-selected client compression level (1-22). The client validates every byte and rejects invalid-format responses, so client and server must run the same current build. The probe socket is closed after the complete response is received; probe bytes are never injected into the Minecraft login stream.
 
 ### 4.2 Asynchronous Execution and Caching
 
@@ -350,7 +350,7 @@ A failed probe does not close the real Minecraft connection; it makes that conne
 
 ZstdNet handles Minecraft TCP only. ZstdNet codecs are not installed on Sable's UDP pipeline, independent `DatagramChannel` instances, or non-Minecraft UDP sockets. Sable remains optional through an optional dependency and runtime pipeline recognition; ZstdNet does not statically link the Sable API.
 
-The server injector uses the Mixin accessor, `ServerChannel` type filtering, and `DatagramChannel` exclusion together to avoid treating an independent UDP listener as a Minecraft TCP acceptor.
+The server injector uses the Mixin accessor, `ServerChannel` type filtering, and `DatagramChannel` exclusion together to avoid treating an independent UDP listener as a Minecraft TCP acceptor. If the accessor mixin is not applied, the injector records `accessor_missing`, logs `transport upgrade: DISABLED`, and leaves vanilla networking in place.
 
 ## 17. Build
 
