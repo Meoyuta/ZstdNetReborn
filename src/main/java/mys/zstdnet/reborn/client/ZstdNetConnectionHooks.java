@@ -30,18 +30,17 @@ public final class ZstdNetConnectionHooks {
             return false;
         }
 
-        var config = ZstdNetClient.config();
-        var capability = CapabilityProbe.cached(host, port);
-        if (capability == null) {
-            capability = CapabilityProbe.awaitResult(host, port, 300L);
+        var protocol = ProtocolProbe.cached(host, port);
+        if (protocol == null) {
+            protocol = ProtocolProbe.awaitResult(host, port, 300L);
         }
-        if (!Boolean.TRUE.equals(capability)) {
+        if (protocol == null || !protocol.supported() || protocol.serverLevel() < 1) {
             PENDING.remove(key(host, port));
-            CapabilityProbe.start(host, port);
+            ProtocolProbe.start(host, port);
             lastState = ZstdState.PROBE_FAILED;
-            ZstdNetClient.logger().info("ZstdNet capability probe failed or timed out for "
+            ZstdNetClient.logger().info("ZstdNet protocol probe failed or timed out for "
                 + host + ":" + port + "; using the ordinary protocol (no compression for this connection)");
-            ZstdNetClient.logger().debug("ZstdNet capability probe pending or failed; using ordinary connection for "
+            ZstdNetClient.logger().debug("ZstdNet protocol probe pending or failed; using ordinary connection for "
                 + host + ":" + port);
             return false;
         }
@@ -49,7 +48,7 @@ public final class ZstdNetConnectionHooks {
         var pending = new PendingConnection(
             host.toLowerCase(Locale.ROOT),
             port,
-            config.compressionLevel(),
+            protocol.serverLevel(),
             System.currentTimeMillis() + PENDING_CONNECT_TTL_MS
         );
         var queue = PENDING.computeIfAbsent(key(host, port), ignored -> new ConcurrentLinkedQueue<>());

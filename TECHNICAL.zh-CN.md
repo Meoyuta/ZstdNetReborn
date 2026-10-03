@@ -7,7 +7,7 @@
 ZstdNet 可分为四层：
 
 - core：Zstandard 持久流、帧格式、Netty 编解码器、字典协议、流量统计和 benchmark,这一部分尽量与Minecraft独立
-- client：客户端压缩等级配置、能力探测缓存、连接准备队列和客户端字典缓存
+- client：协议探测缓存、连接准备队列和客户端字典缓存
 - neoforge：模组生命周期、服务端同端口注入、客户端 Mixin、命令、管理 payload 和 overlay
 - test：协议、字典、Netty 管线、连接选择和 benchmark 的回归测试
 
@@ -18,7 +18,7 @@ ZstdNet 可分为四层：
 一次连接按以下顺序处理：
 
 1. 客户端拦截 Minecraft 的连接入口,取得目标主机和端口
-2. 客户端在后台线程执行 ZstdNet 能力探测；_探测不会阻塞游戏线程_
+2. 客户端在后台线程执行 ZstdNet 协议探测；_探测不会阻塞游戏线程_
 3. 探测成功后,客户端为同一 host:port 保存一次待安装连接记录
 4. Minecraft 创建真正的 TCP Connection 后,ZstdNet 在管线配置完成时读取待安装记录
 5. 客户端安装 ZstdNet 编解码器,并在加密管线建立后重新定位编解码器
@@ -26,17 +26,13 @@ ZstdNet 可分为四层：
 7. 双方确认协议版本后,使用同一条 TCP 字节流上的持久 Zstandard 流传输数据
 8. 连接关闭时释放压缩流,解压 executor、字典会话和连接级统计状态
 
-客户端配置只保存 compression-level；是否安装压缩管线完全由能力探测结果决定。探测失败、超时或响应版本不匹配时,当前连接直接改为使用普通协议,不使用 Zstd 功能
+是否安装压缩管线完全由探测结果决定。探测失败、超时或响应版本不匹配时,当前连接直接使用普通协议。客户端和服务端必须使用当前相同构建版本，不提供本地客户端等级覆盖
 
 ## 3. 客户端配置与连接准备
 
 ### 3.1 客户端配置
 
-由 ClientConfig 从 config/zstdnet-client.properties 读取 `compression-level` 字段.
-
-`compression-level` 字段为客户端的出站压缩等级,默认为 `compression-level=6`
-
-配置目录和文件将在首次启动时自动创建,压缩等级被限制在 1 到 22 之间；若为缺失或非法值则使用 6 作为默认值
+客户端不再提供手动选择压缩等级的配置。客户端出站等级由服务端在协议探测响应中下发，因此每条 ZstdNet 连接都使用服务端当前同步的等级
 
 ### 3.2 连接入口
 
@@ -81,13 +77,13 @@ ConnectionMixin 在 Minecraft configurePacketHandler 完成后调用安装逻辑
 
 服务端返回：
 
-    Z N P 0x02 0x02
+    Z N P 0x02 protocolVersion clientLevel
 
-最后一个字节是协议v2。客户端逐字节校验完整响应,任何字节不匹配都视为不支持。探测 socket 在收到完整响应后关闭,不会把探测字节注入 Minecraft 登录流。
+响应固定为 6 字节：固定前缀加上服务端选择的客户端压缩等级（1-22）。客户端逐字节校验并拒绝非法格式响应,因此客户端和服务端必须是相同版本。探测 socket 在收到完整响应后关闭,不会把探测字节注入 Minecraft 登录流
 
 ### 4.2 异步执行和缓存
 
-CapabilityProbe 使用 daemon executor 执行探测,下列是探测相关的参数：
+ProtocolProbe 使用 daemon executor 执行探测,下列是探测相关的参数：
 
 - TCP 连接超时：1 秒
 - socket 读取超时：1 秒
@@ -127,7 +123,7 @@ ServerConnectionListenerAccessor 使用 @Accessor("channels") 访问 channels �
 - 活跃连接最多 3 个
 - 每分钟握手尝试最多 10 次
 
-握手窗口每 1024 次尝试清理一次过期记录；能力探测分支发生在 admit 之前,将不会占用握手和活跃连接名额
+握手窗口每 1024 次尝试清理一次过期记录；协议探测分支发生在 admit 之前,将不会占用握手和活跃连接名额
 
 ## 6. 服务端协议判定
 
@@ -264,9 +260,9 @@ ZstdNet 安装后,MinecraftCompressionDisabler 处理原版 login compression pa
 
 ## 12. 压缩等级和 benchmark
 
-服务端默认出站等级为 9,客户端默认出站等级为 6。双方等级分别作用于各自方向的持久流。服务端会保存客户端出站等级目标用于管理状态和诊断；客户端实际使用自身本地的 compression-level 配置
+服务端默认出站等级为 9,客户端默认出站等级为 6。双方等级分别作用于各自方向的持久流。服务端在每次成功协议探测响应中下发客户端等级
 
-/zstdnet complevel set <serverLevel> <clientLevel> 会修改服务端出站等级并保存客户端出站等级目标，但不能改写远程客户端的配置文件。benchmark 使用独立 codec 和采样快照测试候选等级,同时记录压缩后大小和编解码耗时,再根据配置范围选择等级。在线连接的持久流不会被 benchmark 复用；等级应用到新连接或下一次流重置
+/zstdnet complevel set <serverLevel> <clientLevel> 会修改两个方向的出站等级。新连接通过协议探测接收客户端等级；成功探测缓存有效期为 5 分钟，因此等级变化传递到新连接最长可能延迟 5 分钟。benchmark 使用独立 codec 和采样快照测试候选等级,同时记录压缩后大小和编解码耗时,再根据配置范围选择等级。在线连接的持久流不会被 benchmark 复用；等级应用到新连接或下一次流重置
 
 ## 13. 统计、状态和诊断
 
@@ -288,13 +284,14 @@ CompressionMetrics 使用并发计数器记录：
 - 发生批量合并的批次数
 - 同步/异步耗时微秒
 - 降级次数
-- 丢弃次数
+- `compress_queued_dropped`：8 MiB 出站队列超限时、在进入持久流前安全丢弃的排队包数量；不会造成持久流失步，是安全行为
+- `compress_frames_lost`：进入持久流后丢失的帧数量；这是严重的持久流一致性错误，通常会导致持久流失步，应立即排查
 - 最大帧耗时
 - 原始数据大小直方图
 
 `compress_sync_us` 和 `compress_async_us` 只统计 codec 压缩阶段；不包含 Netty `ctx.write` 完成和网络 flush 的时间。
 
-注意：compress_dropped 非零应视为协议缺陷信号，说明可能有丢帧情况发生
+`compress_queued_dropped` 表示安全背压丢包；`compress_frames_lost` 非零表示持久流缺陷
 
 ### 13.3 状态和 debug
 

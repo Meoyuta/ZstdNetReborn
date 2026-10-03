@@ -269,6 +269,83 @@ class ZstdNettyPipelineTest {
     }
 
     @Test
+    void outboundOverflowDropsQueuedPacketWithoutDesync() throws Exception {
+        var enteredCompression = new CountDownLatch(1);
+        var releaseCompression = new CountDownLatch(1);
+        IntSupplier level = () -> {
+            enteredCompression.countDown();
+            try {
+                if (!releaseCompression.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("test compression gate timed out");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+            return 3;
+        };
+        var encoder = new ZstdNettyEncoder(level, false, ZstdFrameStats.NONE, null);
+        var server = new EmbeddedChannel(encoder);
+        var client = new EmbeddedChannel(new ZstdNettyDecoder(ZstdFrameStats.NONE));
+        var before = ZstdNettyEncoder.globalMetrics().snapshot();
+        try {
+            server.writeOutbound(Unpooled.buffer(64 * 1024).writeZero(64 * 1024));
+            server.checkException();
+            assertTrue(enteredCompression.await(5, TimeUnit.SECONDS));
+            for (int i = 0; i < 8; i++) {
+                server.writeOutbound(Unpooled.buffer(256 * 1024).writeZero(256 * 1024));
+                server.checkException();
+            }
+            assertThrows(IllegalStateException.class,
+                () -> server.writeOutbound(Unpooled.buffer(8 * 1024 * 1024).writeZero(8 * 1024 * 1024)));
+            try {
+                server.checkException();
+            } catch (IllegalStateException expected) {
+                // The expected overflow promise failure is surfaced by EmbeddedChannel.
+            }
+            var afterDrop = ZstdNettyEncoder.globalMetrics().snapshot();
+            assertTrue(afterDrop.queuedDropped() > before.queuedDropped());
+            assertEquals(before.framesLost(), afterDrop.framesLost());
+            assertTrue(server.isOpen());
+
+            releaseCompression.countDown();
+            long deadline = System.nanoTime() + 10_000_000_000L;
+            while (System.nanoTime() < deadline
+                && (!encoder.isIdleForMove() || encoder.pendingBytesForTest() != 0)) {
+                drainOutbound(server, client);
+                server.runPendingTasks();
+                server.runScheduledPendingTasks();
+                client.runPendingTasks();
+                client.checkException();
+                server.checkException();
+                Thread.yield();
+            }
+            drainOutbound(server, client);
+            assertTrue(encoder.isIdleForMove());
+            assertEquals(0, encoder.pendingBytesForTest());
+
+            var tail = new byte[4096];
+            java.util.Arrays.fill(tail, (byte) 0x5A);
+            server.writeOutbound(Unpooled.wrappedBuffer(tail));
+            server.checkException();
+            server.flush();
+            drainUntilIdle(server, client, encoder);
+            var decoded = collectUntilContains(server, client, tail);
+            assertTrue(contains(decoded, tail), "tail frame was not decoded after queued packet drop");
+            var finalMetrics = ZstdNettyEncoder.globalMetrics().snapshot();
+            assertEquals(before.framesLost(), finalMetrics.framesLost());
+        } finally {
+            releaseCompression.countDown();
+            try {
+                server.finishAndReleaseAll();
+            } catch (Exception ignored) {
+                // The async aggregate promise may complete while the channel closes.
+            }
+            client.finishAndReleaseAll();
+        }
+    }
+
+    @Test
     void outboundBackpressureLimitsPendingBytes() throws Exception {
         var enteredCompression = new CountDownLatch(1);
         var releaseCompression = new CountDownLatch(1);
@@ -626,6 +703,74 @@ class ZstdNettyPipelineTest {
             ZstdFrameCodec.writeFrame(Unpooled.wrappedBuffer(raw), stream, false, out);
         }
         return out;
+    }
+
+    private static void drainOutbound(EmbeddedChannel source, EmbeddedChannel target) {
+        ByteBuf encoded;
+        while ((encoded = source.readOutbound()) != null) {
+            target.writeInbound(encoded);
+            target.checkException();
+        }
+    }
+
+    private static void drainUntilIdle(EmbeddedChannel source, EmbeddedChannel target,
+                                       ZstdNettyEncoder encoder) throws InterruptedException {
+        long deadline = System.nanoTime() + 5_000_000_000L;
+        while (System.nanoTime() < deadline && !encoder.isIdleForMove()) {
+            drainOutbound(source, target);
+            source.runPendingTasks();
+            source.runScheduledPendingTasks();
+            target.runPendingTasks();
+            source.checkException();
+            target.checkException();
+            Thread.yield();
+        }
+        drainOutbound(source, target);
+        assertTrue(encoder.isIdleForMove());
+    }
+
+    private static byte[] collectInbound(EmbeddedChannel channel) {
+        var output = new ByteArrayOutputStream();
+        ByteBuf decoded;
+        while ((decoded = channel.readInbound()) != null) {
+            try {
+                var bytes = new byte[decoded.readableBytes()];
+                decoded.readBytes(bytes);
+                output.writeBytes(bytes);
+            } finally {
+                decoded.release();
+            }
+        }
+        return output.toByteArray();
+    }
+
+    private static boolean contains(byte[] haystack, byte[] needle) {
+        outer: for (int i = 0; i <= haystack.length - needle.length; i++) {
+            for (int j = 0; j < needle.length; j++) {
+                if (haystack[i + j] != needle[j]) continue outer;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private static byte[] collectUntilContains(EmbeddedChannel source, EmbeddedChannel target,
+                                                byte[] needle) throws InterruptedException {
+        long deadline = System.nanoTime() + 5_000_000_000L;
+        var output = new ByteArrayOutputStream();
+        while (System.nanoTime() < deadline) {
+            drainOutbound(source, target);
+            source.runPendingTasks();
+            source.runScheduledPendingTasks();
+            target.runPendingTasks();
+            target.checkException();
+            var bytes = collectInbound(target);
+            output.writeBytes(bytes);
+            var current = output.toByteArray();
+            if (contains(current, needle)) return current;
+            Thread.yield();
+        }
+        return output.toByteArray();
     }
 
 }

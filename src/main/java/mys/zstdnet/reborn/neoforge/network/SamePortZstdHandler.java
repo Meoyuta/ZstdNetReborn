@@ -50,6 +50,7 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
     private final ZstdDictionaryTrainer dictionaryTrainer;
     private final CompressionBenchmark benchmark;
     private final IntSupplier compressionLevel;
+    private final IntSupplier clientCompressionLevel;
     private Mode mode = Mode.UNDECIDED;
     private boolean streamHeaderRead;
     private boolean admitted;
@@ -64,6 +65,19 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
         CompressionBenchmark benchmark,
         IntSupplier compressionLevel
     ) {
+        this(config, stats, logger, dictionaryStore, dictionaryTrainer, benchmark, compressionLevel, () -> 6);
+    }
+
+    SamePortZstdHandler(
+        ZstdNetConfig config,
+        TrafficStats stats,
+        ZstdNetLogger logger,
+        ZstdDictionaryStore dictionaryStore,
+        ZstdDictionaryTrainer dictionaryTrainer,
+        CompressionBenchmark benchmark,
+        IntSupplier compressionLevel,
+        IntSupplier clientCompressionLevel
+    ) {
         this.config = config;
         this.stats = stats;
         this.logger = logger;
@@ -71,6 +85,7 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
         this.dictionaryTrainer = dictionaryTrainer;
         this.benchmark = benchmark;
         this.compressionLevel = compressionLevel;
+        this.clientCompressionLevel = clientCompressionLevel;
     }
 
     @Override
@@ -100,12 +115,15 @@ final class SamePortZstdHandler extends ByteToMessageDecoder {
         if (in.readableBytes() < ZstdFrameCodec.MAGIC.length) {
             return;
         }
-        if (startsWith(in, ZstdFrameCodec.CAPABILITY_MAGIC)) {
-            // Capability probes never consume a connection slot or handshake budget.
-            in.skipBytes(ZstdFrameCodec.CAPABILITY_MAGIC.length);
-            ctx.writeAndFlush(Unpooled.wrappedBuffer(ZstdFrameCodec.CAPABILITY_RESPONSE))
+        if (startsWith(in, ZstdFrameCodec.PROTOCOL_PROBE_MAGIC)) {
+            // Protocol probes never consume a connection slot or handshake budget.
+            in.skipBytes(ZstdFrameCodec.PROTOCOL_PROBE_MAGIC.length);
+            var response = Unpooled.buffer(ZstdFrameCodec.PROTOCOL_PROBE_RESPONSE_BYTES);
+            response.writeBytes(ZstdFrameCodec.PROTOCOL_PROBE_RESPONSE_PREFIX);
+            response.writeByte(Math.clamp(clientCompressionLevel.getAsInt(), 1, 22));
+            ctx.writeAndFlush(response)
                 .addListener(ChannelFutureListener.CLOSE);
-            logger.debug("answered ZstdNet capability probe from " + ctx.channel().remoteAddress());
+            logger.debug("answered ZstdNet protocol probe from " + ctx.channel().remoteAddress());
             return;
         }
         if (startsWithMagic(in)) {

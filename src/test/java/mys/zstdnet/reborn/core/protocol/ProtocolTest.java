@@ -30,9 +30,9 @@ class ProtocolTest {
     }
 
     @Test
-    void capabilityResponseAndStreamHeaderUseTheSameProtocolVersion() {
+    void protocolProbeResponseAndStreamHeaderUseTheSameProtocolVersion() {
         assertEquals(ZstdFrameCodec.PROTOCOL_VERSION,
-            ZstdFrameCodec.CAPABILITY_RESPONSE[ZstdFrameCodec.CAPABILITY_RESPONSE.length - 1]);
+            ZstdFrameCodec.PROTOCOL_PROBE_RESPONSE_PREFIX[ZstdFrameCodec.PROTOCOL_PROBE_RESPONSE_PREFIX.length - 1]);
         assertEquals(ZstdFrameCodec.PROTOCOL_VERSION, mys.zstdnet.reborn.core.netty.ZstdStreamHeader.PROTOCOL_VERSION);
     }
 

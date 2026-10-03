@@ -65,7 +65,7 @@
   "zstdnet.screen.status.ratio": "压缩率：%s",
   "zstdnet.screen.status.connections": "有效连接数：%s",
   "zstdnet.screen.status.compression_level": "服务端出站等级：%s",
-  "zstdnet.screen.status.outbound_level": "客户端出站等级目标：%s",
+  "zstdnet.screen.status.outbound_level": "客户端出站等级：%s",
   "zstdnet.screen.status.inbound_level": "服务端下行等级：%s",
   "zstdnet.screen.status.runtime": "运行时长：%s",
   "zstdnet.screen.status.benchmark_runs": "Benchmark 运行次数：%s",

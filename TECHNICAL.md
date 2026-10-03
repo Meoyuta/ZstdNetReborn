@@ -7,7 +7,7 @@ This document describes the current project's operation and protocol principles.
 ZstdNet can be divided into four layers:
 
 - core: Persistent Zstandard streams, frame format, Netty codecs, dictionary protocol, traffic statistics, and benchmarks. This layer is kept as independent from Minecraft as possible.
-- client: Client compression-level configuration, capability-probe cache, connection-preparation queue, and client dictionary cache.
+- client: Protocol-probe cache, connection-preparation queue, and client dictionary cache.
 - neoforge: Mod lifecycle, same-port server injection, client Mixins, commands, management payloads, and overlay.
 - test: Regression tests for the protocol, dictionaries, Netty pipelines, connection selection, and benchmarks.
 
@@ -18,25 +18,21 @@ The intended runtime environment is Minecraft 1.21.1, NeoForge 21.1.223, and Jav
 A connection is processed in the following order:
 
 1. The client intercepts Minecraft's connection entry point and obtains the target host and port.
-2. The client performs the ZstdNet capability probe on a background thread; the probe does not block the game thread.
+2. The client performs the ZstdNet protocol probe on a background thread; the probe does not block the game thread.
 3. After a successful probe, the client stores one pending-installation record for that host and port.
 4. After Minecraft creates the actual TCP Connection, ZstdNet reads the pending-installation record when the pipeline is configured.
 5. The client installs the ZstdNet codecs and repositions them after the encryption pipeline is established.
-6. The server receives child connections on Minecraft's ServerChannel and first determines whether each connection is a capability probe, a ZstdNet handshake, or ordinary Minecraft traffic.
+6. The server receives child connections on Minecraft's ServerChannel and first determines whether each connection is a protocol probe, a ZstdNet handshake, or ordinary Minecraft traffic.
 7. After both sides confirm the protocol version, data is transferred over a persistent Zstandard stream on the same TCP byte stream.
 8. When the connection closes, the compression streams, decompression executor, dictionary session, and connection-level statistics are released.
 
-The client configuration only stores `compression-level`. Whether the compression pipeline is installed is determined entirely by the capability probe. If probing fails, times out, or returns a mismatched protocol version, the current connection immediately falls back to the ordinary protocol without ZstdNet.
+The compression pipeline is installed only when the protocol probe succeeds. If probing fails, times out, or returns a mismatched protocol version, the current connection immediately continues with the ordinary protocol without ZstdNet. Client and server must use the same current build; there is no local client-level override.
 
 ## 3. Client Configuration and Connection Preparation
 
 ### 3.1 Client Configuration
 
-`ClientConfig` reads the `compression-level` field from `config/zstdnet-client.properties`.
-
-The `compression-level` field controls the client's outbound compression level. Its default is `compression-level=6`.
-
-The configuration directory and file are created automatically on first startup. The compression level is restricted to 1 through 22; a missing or invalid value falls back to 6.
+The client has no manually selected compression-level setting. Its outbound level is supplied by the server in the protocol response, so every ZstdNet connection uses the server's current synchronized value.
 
 ### 3.2 Connection Entry Point
 
@@ -81,13 +77,13 @@ The client sends the following through a temporary TCP socket:
 
 The server returns:
 
-    Z N P 0x02 0x02
+    Z N P 0x02 protocolVersion clientLevel
 
-The final byte identifies protocol version 2. The client validates the complete response byte by byte; any mismatch is treated as unsupported. The probe socket is closed after the complete response is received, so the probe bytes are never injected into the Minecraft login stream.
+The response is exactly 6 bytes: a fixed prefix followed by the server-selected client compression level (1-22). The client validates every byte and rejects truncated, legacy, or invalid-level responses. Client and server must run the same current build; the probe socket is closed after the complete response is received.
 
 ### 4.2 Asynchronous Execution and Caching
 
-`CapabilityProbe` performs probes using a daemon executor. The probe parameters are:
+`ProtocolProbe` performs probes using a daemon executor. The probe parameters are:
 
 - TCP connection timeout: 1 second.
 - Socket read timeout: 1 second.
@@ -127,7 +123,7 @@ ZstdNet connections from one IP have two limits:
 - At most 3 active connections.
 - At most 10 handshake attempts per minute.
 
-The handshake window is cleaned up after every 1024 attempts. The capability-probe branch runs before admission and therefore does not consume handshake or active-connection slots.
+The handshake window is cleaned up after every 1024 attempts. The protocol-probe branch runs before admission and therefore does not consume handshake or active-connection slots.
 
 ## 6. Server Protocol Detection
 
@@ -264,9 +260,9 @@ If a handler being removed does not belong to `net.minecraft.*`, a warning is lo
 
 ## 12. Compression Levels and Benchmarking
 
-The server's default outbound level is 9 and the client's default outbound level is 6. Each level applies independently to the persistent stream in that direction. The server stores a client outbound level target for management and diagnostics; a client applies its own local compression-level setting.
+The server's default outbound level is 9 and the client outbound level advertised by default is 6. Each level applies independently to the persistent stream in that direction. The server includes the client level in every successful protocol response; the client does not override it locally.
 
-The `/zstdnet complevel set <serverLevel> <clientLevel>` command changes the server outbound level and stores the client outbound level target. It cannot rewrite a remote client's configuration file. The benchmark uses an independent codec and sampled snapshots to test candidate levels, recording compressed size and encode/decode time before selecting a level within the configured range. Online persistent streams are never reused by the benchmark; a new level applies to new connections or the next stream reset.
+The `/zstdnet complevel set <serverLevel> <clientLevel>` command changes both advertised outbound levels. New connections receive the client level through protocol probing; successful probe results are cached for 5 minutes, so a changed level can take up to 5 minutes to reach new connections. The benchmark uses an independent codec and sampled snapshots to test candidate levels, recording compressed size and encode/decode time before selecting a level within the configured range. Online persistent streams are never reused by the benchmark; a new level applies to new connections or the next stream reset.
 
 ## 13. Statistics, Status, and Diagnostics
 
@@ -288,13 +284,14 @@ From the server's perspective, the following are recorded:
 - Number of batches that were merged.
 - Synchronous/asynchronous duration in microseconds.
 - Fallback count.
-- Drop count.
+- `compress_queued_dropped`: packets discarded before entering the persistent stream because the 8 MiB outbound queue limit was reached; this is safe and does not desynchronize the stream.
+- `compress_frames_lost`: frames lost after entering the persistent stream; this is a fatal invariant violation and should be investigated immediately.
 - Maximum frame duration.
 - Raw-data-size histogram.
 
 `compress_sync_us` and `compress_async_us` measure codec compression work only; Netty `ctx.write` completion and network flush time are not included.
 
-A non-zero `compress_dropped` should be treated as a protocol-defect signal indicating that frames may have been dropped.
+`compress_queued_dropped` records safe backpressure drops. A non-zero `compress_frames_lost` indicates a persistent-stream defect.
 
 ### 13.3 Status and Debugging
 

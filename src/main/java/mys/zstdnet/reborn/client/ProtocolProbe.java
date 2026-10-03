@@ -16,76 +16,86 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.TimeUnit;
 
-final class CapabilityProbe {
+final class ProtocolProbe {
     private static final int TIMEOUT_MILLIS = 1_000;
     private static final long SUCCESS_TTL_MILLIS = 5 * 60_000L;
     private static final long FAILURE_TTL_MILLIS = 30_000L;
     private static final AtomicInteger THREAD_ID = new AtomicInteger();
     private static final ExecutorService EXECUTOR = new ThreadPoolExecutor(2, 4, 30L, TimeUnit.SECONDS,
         new ArrayBlockingQueue<>(64), task -> {
-        var thread = new Thread(task, "zstdnet-capability-probe-" + THREAD_ID.incrementAndGet());
+        var thread = new Thread(task, "zstdnet-protocol-probe-" + THREAD_ID.incrementAndGet());
         thread.setDaemon(true);
         return thread;
     }, new ThreadPoolExecutor.AbortPolicy());
     private static final Map<String, Cached> CACHE = new ConcurrentHashMap<>();
-    private static final Map<String, CompletableFuture<Boolean>> IN_FLIGHT = new ConcurrentHashMap<>();
+    private static final Map<String, CompletableFuture<ProbeResult>> IN_FLIGHT = new ConcurrentHashMap<>();
 
-    private CapabilityProbe() {}
+    private ProtocolProbe() {}
 
-    static Boolean cached(String host, int port) {
+    static ProbeResult cached(String host, int port) {
         var value = CACHE.get(key(host, port));
-        return value == null || value.expiresAt < System.currentTimeMillis() ? null : value.supported;
+        return value == null || value.expiresAt < System.currentTimeMillis() ? null : value.result;
     }
 
     static void start(String host, int port) {
         request(host, port);
     }
 
-    static Boolean awaitResult(String host, int port, long timeoutMillis) {
+    static void clearForTests() {
+        CACHE.clear();
+        IN_FLIGHT.clear();
+    }
+
+    static ProbeResult awaitResult(String host, int port, long timeoutMillis) {
         var cached = cached(host, port);
         if (cached != null) return cached;
         try {
             return request(host, port).get(timeoutMillis, TimeUnit.MILLISECONDS);
         } catch (Exception ignored) {
-            return false;
+            return ProbeResult.unsupported();
         }
     }
 
-    private static CompletableFuture<Boolean> request(String host, int port) {
+    private static CompletableFuture<ProbeResult> request(String host, int port) {
         var cacheKey = key(host, port);
-        if (cached(host, port) != null) return CompletableFuture.completedFuture(cached(host, port));
+        var cached = cached(host, port);
+        if (cached != null) return CompletableFuture.completedFuture(cached);
         return IN_FLIGHT.computeIfAbsent(cacheKey, ignored -> {
-            CompletableFuture<Boolean> future;
+            CompletableFuture<ProbeResult> future;
             try {
                 future = CompletableFuture.supplyAsync(() -> probe(host, port), EXECUTOR)
                     .orTimeout(TIMEOUT_MILLIS + 250L, TimeUnit.MILLISECONDS)
-                    .exceptionally(error -> false);
+                    .exceptionally(error -> ProbeResult.unsupported());
             } catch (RejectedExecutionException rejected) {
-                future = CompletableFuture.completedFuture(false);
+                future = CompletableFuture.completedFuture(ProbeResult.unsupported());
             }
             return future.whenComplete((supported, error) -> {
-                boolean result = error == null && Boolean.TRUE.equals(supported);
+                var result = error == null && supported != null ? supported : ProbeResult.unsupported();
                 CACHE.put(cacheKey, new Cached(result, System.currentTimeMillis()
-                    + (result ? SUCCESS_TTL_MILLIS : FAILURE_TTL_MILLIS)));
+                    + (result.supported() ? SUCCESS_TTL_MILLIS : FAILURE_TTL_MILLIS)));
                 IN_FLIGHT.remove(cacheKey);
             });
         });
     }
 
-    private static boolean probe(String host, int port) {
+    private static ProbeResult probe(String host, int port) {
         try (var socket = new Socket()) {
             socket.connect(new InetSocketAddress(host, port), TIMEOUT_MILLIS);
             socket.setSoTimeout(TIMEOUT_MILLIS);
             OutputStream output = socket.getOutputStream();
-            output.write(ZstdFrameCodec.CAPABILITY_MAGIC);
+            output.write(ZstdFrameCodec.PROTOCOL_PROBE_MAGIC);
             output.flush();
             InputStream input = socket.getInputStream();
-            for (byte expected : ZstdFrameCodec.CAPABILITY_RESPONSE) {
-                if (input.read() != (expected & 0xFF)) return false;
+            byte[] response = input.readNBytes(ZstdFrameCodec.PROTOCOL_PROBE_RESPONSE_BYTES);
+            if (response.length != ZstdFrameCodec.PROTOCOL_PROBE_RESPONSE_BYTES) return ProbeResult.unsupported();
+            for (int i = 0; i < ZstdFrameCodec.PROTOCOL_PROBE_RESPONSE_PREFIX.length; i++) {
+                if (response[i] != ZstdFrameCodec.PROTOCOL_PROBE_RESPONSE_PREFIX[i]) return ProbeResult.unsupported();
             }
-            return true;
+            int level = response[ZstdFrameCodec.PROTOCOL_PROBE_RESPONSE_BYTES - 1] & 0xFF;
+            if (level < 1 || level > 22) return ProbeResult.unsupported();
+            return new ProbeResult(true, level);
         } catch (Exception ignored) {
-            return false;
+            return ProbeResult.unsupported();
         }
     }
 
@@ -93,5 +103,11 @@ final class CapabilityProbe {
         return host.toLowerCase(java.util.Locale.ROOT) + ":" + port;
     }
 
-    private record Cached(boolean supported, long expiresAt) {}
+    record ProbeResult(boolean supported, int serverLevel) {
+        static ProbeResult unsupported() {
+            return new ProbeResult(false, -1);
+        }
+    }
+
+    private record Cached(ProbeResult result, long expiresAt) {}
 }

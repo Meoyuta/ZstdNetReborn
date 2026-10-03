@@ -14,7 +14,7 @@ Run `bash ./build.sh` from this directory. The script builds the client and serv
 
 The build script copies the built mod artifact to `target/ZstdNet-1.21.1-neoforge-server-client-<version>.jar`. Install the same build on the server and every client that connects to it. This mod is still under development, and the updated protocol is incompatible with older versions, so keep the client and server versions synchronized.
 
-After ZstdNet is installed on the client, every server must first pass the ZstdNet capability probe. Ordinary servers continue to use the plain protocol when probing fails; **the current version does not support integrated servers (this mod's features cannot be used in multiplayer/LAN play)**
+After ZstdNet is installed on the client, every server must first pass the ZstdNet protocol probe. Ordinary servers continue to use the plain protocol when probing fails; **the current version does not support integrated servers (this mod's features cannot be used in multiplayer/LAN play)**
 
 ## Incompatible Mods
 
@@ -46,7 +46,7 @@ When both are installed, ZstdNet replaces the other compression mod's handler wh
 _(The following commands require permission level 2.)_
 
 - `/zstdnet start`, `/zstdnet stop`, `/zstdnet reload`: start, stop, or reload the ZstdNet service
-- `/zstdnet complevel set <serverLevel> <clientLevel>`: set the server outbound level and the client outbound level target for new connections (each level is 1-22); the client applies its own local setting
+- `/zstdnet complevel set <serverLevel> <clientLevel>`: set the server and client outbound levels advertised to new connections (each level is 1-22)
 - `/zstdnet benchmark start`: immediately start a compression benchmark
 - `/zstdnet benchmark interval <minutes>`: set the benchmark interval
 - `/zstdnet dictionary train [seconds]`: collect network samples and train a dictionary for the specified duration (600 seconds by default)

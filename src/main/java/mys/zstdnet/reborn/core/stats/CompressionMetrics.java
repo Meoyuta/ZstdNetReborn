@@ -9,7 +9,8 @@ public final class CompressionMetrics {
     private final LongAdder syncMicros = new LongAdder();
     private final LongAdder asyncMicros = new LongAdder();
     private final LongAdder degraded = new LongAdder();
-    private final LongAdder dropped = new LongAdder();
+    private final LongAdder queuedDropped = new LongAdder();
+    private final LongAdder framesLost = new LongAdder();
     private final AtomicLong maxFrameMicros = new AtomicLong();
     private final LongAdder[] sizeHistogram = {
         new LongAdder(), new LongAdder(), new LongAdder(), new LongAdder(),
@@ -41,8 +42,14 @@ public final class CompressionMetrics {
         degraded.increment();
     }
 
-    public void recordDropped() {
-        dropped.increment();
+    /** A packet rejected before it enters the persistent stream. */
+    public void recordQueuedDropped() {
+        queuedDropped.increment();
+    }
+
+    /** A frame failed after the persistent stream had already advanced. */
+    public void recordFrameLost() {
+        framesLost.increment();
     }
 
     private static int bucket(int bytes) {
@@ -60,9 +67,10 @@ public final class CompressionMetrics {
         long[] histogram = new long[sizeHistogram.length];
         for (int i = 0; i < histogram.length; i++) histogram[i] = sizeHistogram[i].sum();
         return new Snapshot(frames.sum(), batches.sum(), syncMicros.sum(), asyncMicros.sum(),
-            degraded.sum(), dropped.sum(), maxFrameMicros.get(), histogram);
+            degraded.sum(), queuedDropped.sum(), framesLost.sum(), maxFrameMicros.get(), histogram);
     }
 
     public record Snapshot(long frames, long batches, long syncMicros, long asyncMicros,
-                           long degraded, long dropped, long maxFrameMicros, long[] sizeHistogram) {}
+                           long degraded, long queuedDropped, long framesLost,
+                           long maxFrameMicros, long[] sizeHistogram) {}
 }

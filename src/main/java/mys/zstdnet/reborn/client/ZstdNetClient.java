@@ -10,7 +10,6 @@ import java.nio.file.Path;
 import java.util.Objects;
 
 public final class ZstdNetClient {
-    private static volatile ClientConfig config;
     private static volatile ZstdNetLogger logger;
     private static volatile ZstdDictionaryStore dictionaryStore;
     private static volatile java.util.function.Supplier<ZstdDictionaryDownloadListener> dictionaryDownloadListeners =
@@ -21,18 +20,9 @@ public final class ZstdNetClient {
 
     public static void init(Path configDir, ZstdNetLogger proxyLogger) {
         logger = Objects.requireNonNull(proxyLogger, "proxyLogger");
-        config = ClientConfig.load(configDir);
         dictionaryStore = new ZstdDictionaryStore(configDir.resolve("zstdnet").resolve("dict").resolve("dictionary.zdict"), logger);
         dictionaryStore.loadSelected();
         logger.info("ZstdNet client initialized");
-    }
-
-    public static ClientConfig config() {
-        var current = config;
-        if (current == null) {
-            return ClientConfig.load(Path.of("config"));
-        }
-        return current;
     }
 
     public static ZstdNetLogger logger() {

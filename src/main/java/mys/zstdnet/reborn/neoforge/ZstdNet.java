@@ -196,7 +196,8 @@ public final class ZstdNet {
                 dictionaryStore,
                 trainer,
                 benchmark,
-                compressionLevel::get
+                compressionLevel::get,
+                clientCompressionLevel::get
             );
             next.inject();
             if (SamePortZstdInjector.lastState() != SamePortZstdInjector.InjectState.OK) {
@@ -541,7 +542,8 @@ public final class ZstdNet {
             out.write("compress_sync_us=" + compressionMetrics.syncMicros() + "\n");
             out.write("compress_async_us=" + compressionMetrics.asyncMicros() + "\n");
             out.write("compress_degraded=" + compressionMetrics.degraded() + "\n");
-            out.write("compress_dropped=" + compressionMetrics.dropped() + "\n");
+            out.write("compress_queued_dropped=" + compressionMetrics.queuedDropped() + "\n");
+            out.write("compress_frames_lost=" + compressionMetrics.framesLost() + "\n");
             out.write("compress_max_frame_us=" + compressionMetrics.maxFrameMicros() + "\n");
             out.write("compress_size_hist=" + java.util.Arrays.toString(compressionMetrics.sizeHistogram()) + "\n");
             out.write("dictionary_connections=" + dictionaryConnections() + "\n");

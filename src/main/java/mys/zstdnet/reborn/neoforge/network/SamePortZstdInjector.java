@@ -33,6 +33,7 @@ public final class SamePortZstdInjector implements AutoCloseable {
     private final ZstdDictionaryTrainer dictionaryTrainer;
     private final CompressionBenchmark benchmark;
     private final IntSupplier compressionLevel;
+    private final IntSupplier clientCompressionLevel;
     private final TrafficStats stats = new TrafficStats();
     private final List<Channel> injectedServerChannels = new ArrayList<>();
 
@@ -45,6 +46,20 @@ public final class SamePortZstdInjector implements AutoCloseable {
         CompressionBenchmark benchmark,
         IntSupplier compressionLevel
     ) {
+        this(minecraftServer, config, logger, dictionaryStore, dictionaryTrainer, benchmark,
+            compressionLevel, () -> 6);
+    }
+
+    public SamePortZstdInjector(
+        MinecraftServer minecraftServer,
+        ZstdNetConfig config,
+        ZstdNetLogger logger,
+        ZstdDictionaryStore dictionaryStore,
+        ZstdDictionaryTrainer dictionaryTrainer,
+        CompressionBenchmark benchmark,
+        IntSupplier compressionLevel,
+        IntSupplier clientCompressionLevel
+    ) {
         this.minecraftServer = Objects.requireNonNull(minecraftServer, "minecraftServer");
         this.config = Objects.requireNonNull(config, "config");
         this.logger = Objects.requireNonNull(logger, "logger");
@@ -52,6 +67,7 @@ public final class SamePortZstdInjector implements AutoCloseable {
         this.dictionaryTrainer = Objects.requireNonNull(dictionaryTrainer, "dictionaryTrainer");
         this.benchmark = Objects.requireNonNull(benchmark, "benchmark");
         this.compressionLevel = Objects.requireNonNull(compressionLevel, "compressionLevel");
+        this.clientCompressionLevel = Objects.requireNonNull(clientCompressionLevel, "clientCompressionLevel");
     }
 
     public MinecraftServer server() {
@@ -158,7 +174,7 @@ public final class SamePortZstdInjector implements AutoCloseable {
                 child.pipeline().addFirst(
                     CONNECTION_HANDLER,
                     new SamePortZstdHandler(config, stats, logger, dictionaryStore, dictionaryTrainer,
-                        benchmark, compressionLevel)
+                        benchmark, compressionLevel, clientCompressionLevel)
                 );
             }
             super.channelRead(ctx, msg);

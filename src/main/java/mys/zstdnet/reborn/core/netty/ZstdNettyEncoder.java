@@ -109,6 +109,7 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
                     "encoder pending outbound limit exceeded: pendingBytes=" + pendingBytes + ", nextBytes=" + length);
                 LOGGER.warn("encoder outbound queue limit exceeded; dropping packet: pendingBytes={}, nextBytes={}",
                     pendingBytes, length);
+                metrics.recordQueuedDropped();
                 msg.release();
                 promise.tryFailure(overflow);
                 return;
@@ -285,6 +286,7 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
             metrics.recordSync(total, batch.size(), compressionNanos);
             ctx.write(encoded, aggregate);
         } catch (Throwable error) {
+            if (persistentStream != null) metrics.recordFrameLost();
             if (!rawReleased) raw.release();
             encoded.release();
             for (var item : batch) item.promise.tryFailure(error);
@@ -364,6 +366,7 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
                 raw.release();
                 encoded.release();
                 for (var item : batch) item.promise.tryFailure(error);
+                if (persistentStream != null) metrics.recordFrameLost();
                 ctx.fireExceptionCaught(error);
                 ctx.close();
             }
