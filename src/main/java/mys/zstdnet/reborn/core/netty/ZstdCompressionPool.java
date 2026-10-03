@@ -29,6 +29,18 @@ final class ZstdCompressionPool {
         return EXECUTOR.getMaximumPoolSize();
     }
 
+    static int coreThreads() {
+        return EXECUTOR.getCorePoolSize();
+    }
+
+    static int poolSize() {
+        return EXECUTOR.getPoolSize();
+    }
+
+    static int activeThreads() {
+        return EXECUTOR.getActiveCount();
+    }
+
     static void execute(Runnable task) throws RejectedExecutionException {
         EXECUTOR.execute(task);
     }

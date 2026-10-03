@@ -10,7 +10,7 @@ ZstdNet 是一个为 Minecraft 1.21.1 的网络连接增加 Zstandard(Zstd) 压�
 
 ## 构建
 
-在本目录运行 `bash ./build.sh`。脚本构建双端模组，此脚本将构建完成的 jar 文件放在 `target/`，并将构建日志写入同目录的 `build.log`。
+在本目录运行 `bash ./build.sh`。脚本构建双端模组，此脚本将构建完成的 jar 文件放在 `target/`，并将构建日志写入同目录的 `build.log`
 
 构建脚本会将构建好的模组产物复制到 `target/ZstdNet-1.21.1-neoforge-server-client-<version>.jar`。服务端及所有参与连接的客户端应安装相同构建版本。因为模组尚处于开发阶段，更新后的协议不兼容旧版本，请保持客户端与服务端版本同步
 
@@ -46,7 +46,7 @@ ZstdNet 是一个为 Minecraft 1.21.1 的网络连接增加 Zstandard(Zstd) 压�
 _（以下指令需要2级权限）_
 
 - `/zstdnet start`、`/zstdnet stop`、`/zstdnet reload`：启动、停止或重新加载 ZstdNet 服务
-- `/zstdnet complevel set <1-22>`：设置新连接使用的服务端压缩等级
+- `/zstdnet complevel set <serverLevel> <clientLevel>`：设置新连接的服务端出站等级和客户端出站等级目标（每个等级范围为 1-22）注意：客户端实际使用本地配置
 - `/zstdnet benchmark start`：立即启动一次压缩 benchmark
 - `/zstdnet benchmark interval <分钟>`：设置 benchmark 的执行间隔
 - `/zstdnet dictionary train [秒]`：采集指定时长的网络样本并训练字典（默认 600 秒）

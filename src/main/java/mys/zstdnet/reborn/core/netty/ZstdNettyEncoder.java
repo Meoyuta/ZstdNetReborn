@@ -22,6 +22,7 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     private static final int MAX_BATCH_BYTES = 64 * 1024;
     private static final int FLUSH_DELAY_MILLIS = 2;
     private static final int MAX_PENDING_PACKETS = 4096;
+    private static final int MAX_PENDING_OUTBOUND_BYTES = 8 * 1024 * 1024;
     private static final int ASYNC_COMPRESSION_THRESHOLD = 64 * 1024;
     private static final CompressionMetrics GLOBAL_METRICS = new CompressionMetrics();
     private final IntSupplier level;
@@ -69,7 +70,15 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     }
 
     boolean isIdleForMove() {
-        return pending.isEmpty() && scheduledFlush == null;
+        return pending.isEmpty() && scheduledFlush == null && !asyncCompressionInFlight;
+    }
+
+    boolean isAsyncCompressionInFlight() {
+        return asyncCompressionInFlight;
+    }
+
+    int pendingBytesForTest() {
+        return pendingBytes;
     }
 
     public CompressionMetrics metrics() {
@@ -87,16 +96,30 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
             ctx.write(message, promise);
             return;
         }
-        if (asyncCompressionInFlight) {
-            pending.addLast(new PendingWrite(msg, promise));
-            pendingBytes += msg.readableBytes();
-            if (pending.size() >= MAX_PENDING_PACKETS) flushPending(ctx);
-            return;
-        }
         if (closed || !ctx.channel().isActive()) {
             LOGGER.debug("encoder write rejected: closed={} active={}", closed, ctx.channel().isActive());
             msg.release();
             promise.tryFailure(new ClosedChannelException());
+            return;
+        }
+        if (asyncCompressionInFlight) {
+            int length = msg.readableBytes();
+            if ((long) pendingBytes + length > MAX_PENDING_OUTBOUND_BYTES) {
+                var overflow = new IllegalStateException(
+                    "encoder pending outbound limit exceeded: pendingBytes=" + pendingBytes + ", nextBytes=" + length);
+                LOGGER.warn("encoder outbound queue limit exceeded; dropping packet: pendingBytes={}, nextBytes={}",
+                    pendingBytes, length);
+                msg.release();
+                promise.tryFailure(overflow);
+                return;
+            }
+            pending.addLast(new PendingWrite(msg, promise));
+            pendingBytes += length;
+            if (pendingBytes >= MAX_PENDING_OUTBOUND_BYTES
+                && ctx.channel().config().isAutoRead()) {
+                LOGGER.debug("encoder outbound backpressure enabled: pendingBytes={}", pendingBytes);
+                ctx.channel().config().setAutoRead(false);
+            }
             return;
         }
         int length = msg.readableBytes();
@@ -122,6 +145,7 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
         closed = true;
         cancelScheduledFlush();
         failPending(new ClosedChannelException());
+        restoreAutoRead(ctx);
         closePersistentStreamQuietly();
         super.channelInactive(ctx);
     }
@@ -292,6 +316,8 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
                         for (var item : batch) item.promise.tryFailure(
                             result == null ? new ClosedChannelException() : result);
                         if (result != null) ctx.fireExceptionCaught(result);
+                        restoreAutoRead(ctx);
+                        closePersistentStreamQuietly();
                         ctx.close();
                         return;
                     }
@@ -310,7 +336,8 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
                         ctx.write(encoded, aggregate);
                     }
                     flushPending(ctx);
-                    if (!pending.isEmpty()) ctx.flush();
+                    ctx.flush();
+                    restoreAutoRead(ctx);
                 });
             });
         } catch (RejectedExecutionException rejected) {
@@ -340,6 +367,7 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
                 ctx.fireExceptionCaught(error);
                 ctx.close();
             }
+            restoreAutoRead(ctx);
         }
     }
 
@@ -350,6 +378,12 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
             item.promise.tryFailure(error);
         }
         pendingBytes = 0;
+    }
+
+    private static void restoreAutoRead(io.netty.channel.ChannelHandlerContext ctx) {
+        if (ctx.channel().isActive() && !ctx.channel().config().isAutoRead()) {
+            ctx.channel().config().setAutoRead(true);
+        }
     }
 
     private void cancelScheduledFlush() {
@@ -364,11 +398,15 @@ public final class ZstdNettyEncoder extends ChannelDuplexHandler {
     @Override
     public void handlerRemoved(io.netty.channel.ChannelHandlerContext ctx) throws Exception {
         closed = true;
+        cancelScheduledFlush();
+        failPending(new ClosedChannelException());
+        restoreAutoRead(ctx);
         closePersistentStreamQuietly();
         super.handlerRemoved(ctx);
     }
 
     private void closePersistentStreamQuietly() {
+        if (asyncCompressionInFlight) return;
         try {
             closePersistentStream();
         } catch (java.io.IOException error) {

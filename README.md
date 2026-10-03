@@ -46,7 +46,7 @@ When both are installed, ZstdNet replaces the other compression mod's handler wh
 _(The following commands require permission level 2.)_
 
 - `/zstdnet start`, `/zstdnet stop`, `/zstdnet reload`: start, stop, or reload the ZstdNet service
-- `/zstdnet complevel set <1-22>`: set the compression level used by new server connections
+- `/zstdnet complevel set <serverLevel> <clientLevel>`: set the server outbound level and the client outbound level target for new connections (each level is 1-22); the client applies its own local setting
 - `/zstdnet benchmark start`: immediately start a compression benchmark
 - `/zstdnet benchmark interval <minutes>`: set the benchmark interval
 - `/zstdnet dictionary train [seconds]`: collect network samples and train a dictionary for the specified duration (600 seconds by default)

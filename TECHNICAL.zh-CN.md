@@ -264,9 +264,9 @@ ZstdNet 安装后,MinecraftCompressionDisabler 处理原版 login compression pa
 
 ## 12. 压缩等级和 benchmark
 
-服务端默认出站等级为 9,客户端默认出站等级为 6。双方等级分别作用于各自方向的持久流
+服务端默认出站等级为 9,客户端默认出站等级为 6。双方等级分别作用于各自方向的持久流。服务端会保存客户端出站等级目标用于管理状态和诊断；客户端实际使用自身本地的 compression-level 配置
 
-服务端命令可以修改新连接使用的等级。benchmark 使用独立 codec 和采样快照测试候选等级,同时记录压缩后大小和编解码耗时,再根据配置范围选择等级。在线连接的持久流不会被 benchmark 复用；等级应用到新连接或下一次流重置
+/zstdnet complevel set <serverLevel> <clientLevel> 会修改服务端出站等级并保存客户端出站等级目标，但不能改写远程客户端的配置文件。benchmark 使用独立 codec 和采样快照测试候选等级,同时记录压缩后大小和编解码耗时,再根据配置范围选择等级。在线连接的持久流不会被 benchmark 复用；等级应用到新连接或下一次流重置
 
 ## 13. 统计、状态和诊断
 
@@ -321,7 +321,7 @@ CompressionMetrics 使用并发计数器记录：
 需 2级 权限：
 
 - start、stop、reload：管理服务端 Zstd 服务
-- complevel set <1-22>：设置服务端压缩等级
+- complevel set <serverLevel> <clientLevel>：设置服务端出站等级并保存客户端出站等级目标（均为 1-22）
 - benchmark start、benchmark interval <分钟>：控制 benchmark
 - dictionary train <seconds>、stop、cancel：控制训练
 - dictionary import <路径>、export、switch <字典名>、unload、name <文件> <字典名>：管理字典

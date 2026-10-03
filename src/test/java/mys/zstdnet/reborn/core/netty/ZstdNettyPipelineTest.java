@@ -12,6 +12,10 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.IntSupplier;
 import java.io.ByteArrayOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -191,10 +195,180 @@ class ZstdNettyPipelineTest {
     }
 
     @Test
-    void decompressionUsesBoundedSharedPool() {
-        assertTrue(ZstdCompressionPool.maximumThreads() >= 4);
-        assertTrue(ZstdCompressionPool.maximumThreads() <= Runtime.getRuntime().availableProcessors()
-            || Runtime.getRuntime().availableProcessors() < 4);
+    void compressionTasksShareBoundedWorkerPool() throws Exception {
+        int taskCount = Math.min(4, ZstdCompressionPool.maximumThreads());
+        var started = new CountDownLatch(taskCount);
+        var release = new CountDownLatch(1);
+        var completed = new CountDownLatch(taskCount);
+        var workerNames = ConcurrentHashMap.<String>newKeySet();
+        try {
+            for (int i = 0; i < taskCount; i++) {
+                ZstdCompressionPool.execute(() -> {
+                    workerNames.add(Thread.currentThread().getName());
+                    started.countDown();
+                    try {
+                        release.await();
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        completed.countDown();
+                    }
+                });
+            }
+            assertTrue(started.await(5, TimeUnit.SECONDS), "shared pool did not start concurrent tasks");
+            assertTrue(workerNames.size() >= 2, "tasks should execute concurrently on shared workers");
+            assertTrue(ZstdCompressionPool.poolSize() <= ZstdCompressionPool.maximumThreads());
+            assertTrue(ZstdCompressionPool.activeThreads() <= ZstdCompressionPool.maximumThreads());
+        } finally {
+            release.countDown();
+            assertTrue(completed.await(5, TimeUnit.SECONDS), "shared pool test tasks did not finish");
+        }
+    }
+
+    @Test
+    void asyncCompressionInFlightPreventsEncoderMove() throws Exception {
+        var enteredCompression = new CountDownLatch(1);
+        var releaseCompression = new CountDownLatch(1);
+        IntSupplier level = () -> {
+            enteredCompression.countDown();
+            try {
+                if (!releaseCompression.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("test compression gate timed out");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+            return 3;
+        };
+        var encoder = new ZstdNettyEncoder(level, false, ZstdFrameStats.NONE, null);
+        var channel = new EmbeddedChannel();
+        channel.pipeline().addLast("prepender", new ChannelOutboundHandlerAdapter());
+        channel.pipeline().addLast(ZstdNettyPipeline.OUTBOUND_HANDLER, encoder);
+        try {
+            channel.writeOutbound(Unpooled.buffer(64 * 1024).writeZero(64 * 1024));
+            channel.checkException();
+            assertTrue(enteredCompression.await(5, TimeUnit.SECONDS));
+            assertTrue(encoder.isAsyncCompressionInFlight());
+            assertFalse(encoder.isIdleForMove());
+
+            ZstdNettyPipeline.reposition(channel.pipeline());
+            assertSame(encoder, channel.pipeline().get(ZstdNettyPipeline.OUTBOUND_HANDLER));
+            assertTrue(channel.pipeline().names().indexOf(ZstdNettyPipeline.OUTBOUND_HANDLER)
+                > channel.pipeline().names().indexOf("prepender"));
+        } finally {
+            releaseCompression.countDown();
+            try {
+                channel.close();
+                channel.runPendingTasks();
+                channel.finishAndReleaseAll();
+            } catch (Exception ignored) {
+                // Closing also fails promises for intentionally dropped pending writes.
+            }
+        }
+    }
+
+    @Test
+    void outboundBackpressureLimitsPendingBytes() throws Exception {
+        var enteredCompression = new CountDownLatch(1);
+        var releaseCompression = new CountDownLatch(1);
+        IntSupplier level = () -> {
+            enteredCompression.countDown();
+            try {
+                if (!releaseCompression.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("test compression gate timed out");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+            return 3;
+        };
+        var encoder = new ZstdNettyEncoder(level, false, ZstdFrameStats.NONE, null);
+        var channel = new EmbeddedChannel(encoder);
+        try {
+            channel.writeOutbound(Unpooled.buffer(64 * 1024).writeZero(64 * 1024));
+            channel.checkException();
+            assertTrue(enteredCompression.await(5, TimeUnit.SECONDS));
+
+            channel.writeOutbound(Unpooled.buffer(8 * 1024 * 1024).writeZero(8 * 1024 * 1024));
+            channel.checkException();
+            assertFalse(channel.config().isAutoRead());
+            assertEquals(8 * 1024 * 1024, encoder.pendingBytesForTest());
+
+            var overflow = Unpooled.buffer(1).writeByte(1);
+            var overflowPromise = channel.newPromise();
+            channel.pipeline().write(overflow, overflowPromise);
+            channel.checkException();
+            assertTrue(overflowPromise.isDone());
+            assertFalse(overflowPromise.isSuccess());
+        } finally {
+            releaseCompression.countDown();
+            try {
+                channel.close();
+                channel.runPendingTasks();
+                channel.finishAndReleaseAll();
+            } catch (Exception ignored) {
+                // Closing also fails promises for intentionally dropped pending writes.
+            }
+        }
+    }
+
+    @Test
+    void repositionDuringAsyncCompressionKeepsPersistentStreamIntact() throws Exception {
+        var enteredCompression = new CountDownLatch(1);
+        var releaseCompression = new CountDownLatch(1);
+        IntSupplier level = () -> {
+            enteredCompression.countDown();
+            try {
+                if (!releaseCompression.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("test compression gate timed out");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+            return 3;
+        };
+        var server = new EmbeddedChannel();
+        var client = new EmbeddedChannel(new ZstdNettyDecoder(ZstdFrameStats.NONE));
+        var first = new byte[64 * 1024];
+        var second = new byte[4096];
+        java.util.Arrays.fill(first, (byte) 'a');
+        java.util.Arrays.fill(second, (byte) 'b');
+        server.pipeline().addLast("prepender", new ChannelOutboundHandlerAdapter());
+        var encoder = new ZstdNettyEncoder(level, false, ZstdFrameStats.NONE, null);
+        server.pipeline().addLast(ZstdNettyPipeline.OUTBOUND_HANDLER, encoder);
+        server.pipeline().addLast("encrypt", new ChannelOutboundHandlerAdapter());
+        try {
+            server.writeOutbound(Unpooled.wrappedBuffer(first));
+            server.checkException();
+            assertTrue(enteredCompression.await(5, TimeUnit.SECONDS));
+            assertTrue(encoder.isAsyncCompressionInFlight());
+            ZstdNettyPipeline.reposition(server.pipeline());
+            assertSame(encoder, server.pipeline().get(ZstdNettyPipeline.OUTBOUND_HANDLER));
+            releaseCompression.countDown();
+            awaitEncoderIdle(server, encoder);
+            ByteBuf firstWire = server.readOutbound();
+            assertNotNull(firstWire);
+            client.writeInbound(firstWire);
+            client.checkException();
+            assertInboundEventually(client, first);
+
+            ZstdNettyPipeline.reposition(server.pipeline());
+            server.writeOutbound(Unpooled.wrappedBuffer(second));
+            server.checkException();
+            client.writeInbound(awaitOutbound(server));
+            client.checkException();
+            assertInboundEventually(client, second);
+        } finally {
+            try {
+                server.finishAndReleaseAll();
+            } catch (Exception ignored) {
+                // The async aggregate promise is completed while the test channel closes.
+            }
+            client.finishAndReleaseAll();
+        }
     }
 
     @Test
@@ -396,6 +570,18 @@ class ZstdNettyPipelineTest {
         }
     }
 
+    private static void assertInboundEventually(EmbeddedChannel channel, byte[] expected)
+        throws InterruptedException {
+        ByteBuf actual = awaitInbound(channel);
+        try {
+            var bytes = new byte[actual.readableBytes()];
+            actual.readBytes(bytes);
+            assertArrayEquals(expected, bytes);
+        } finally {
+            actual.release();
+        }
+    }
+
     private static ByteBuf awaitOutbound(EmbeddedChannel channel) throws InterruptedException {
         long deadline = System.nanoTime() + 5_000_000_000L;
         ByteBuf result;
@@ -420,6 +606,18 @@ class ZstdNettyPipelineTest {
         }
         assertNotNull(result, "asynchronous decompressed output did not arrive");
         return result;
+    }
+
+    private static void awaitEncoderIdle(EmbeddedChannel channel, ZstdNettyEncoder encoder)
+        throws InterruptedException {
+        long deadline = System.nanoTime() + 5_000_000_000L;
+        while (encoder.isAsyncCompressionInFlight() && System.nanoTime() < deadline) {
+            channel.runPendingTasks();
+            channel.runScheduledPendingTasks();
+            channel.checkException();
+            Thread.yield();
+        }
+        assertFalse(encoder.isAsyncCompressionInFlight(), "asynchronous compression did not finish");
     }
 
     private static ByteBuf encodeFrame(byte[] raw) throws Exception {

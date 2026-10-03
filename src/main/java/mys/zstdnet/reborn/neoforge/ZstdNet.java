@@ -58,6 +58,7 @@ public final class ZstdNet {
     private CompressionBenchmark benchmark;
     private volatile net.minecraft.server.level.ServerPlayer pendingBenchmarkRequester;
     private final AtomicInteger compressionLevel = new AtomicInteger(9);
+    private final AtomicInteger clientCompressionLevel = new AtomicInteger(6);
     private final AtomicInteger benchmarkRunCount = new AtomicInteger();
     private volatile long runtimeStartedNanos;
     private final AtomicLong lastTickNanos = new AtomicLong();
@@ -304,7 +305,7 @@ public final class ZstdNet {
                 : SamePortZstdInjector.zstdState().wireName(), player.getServer().getPort(),
                 stats.wireUpBytes(), stats.rawUpBytes(), stats.wireDownBytes(), stats.rawDownBytes(),
                 stats.wireUpRate(), stats.rawUpRate(), stats.wireDownRate(), stats.rawDownRate(),
-                stats.ratioPercent(), stats.connections(), compressionLevel.get(), compressionLevel.get(),
+                stats.ratioPercent(), stats.connections(), compressionLevel.get(), clientCompressionLevel.get(),
                 mys.zstdnet.reborn.core.protocol.ZstdPersistentStreamCodec.DECODE_LEVEL, dictionary,
                 dictionaryConnections(), selectedDictionaryConnections(),
                 injector == null ? 0 : injector.dictionaryFallbacks(),
@@ -451,8 +452,17 @@ public final class ZstdNet {
     }
 
     public synchronized void setTemporaryCompressionLevel(int level) {
+        setTemporaryCompressionLevels(level, clientCompressionLevel.get());
+    }
+
+    public synchronized void setTemporaryCompressionLevels(int serverLevel, int clientLevel) {
         if (benchmark == null) throw new IllegalStateException("compression benchmark is not initialized");
-        benchmark.setTemporaryLevel(level);
+        benchmark.setTemporaryLevel(Math.clamp(serverLevel, 1, 22));
+        clientCompressionLevel.set(Math.clamp(clientLevel, 1, 22));
+    }
+
+    synchronized int clientCompressionLevel() {
+        return clientCompressionLevel.get();
     }
 
     synchronized void setAutomaticCompression() throws IOException {
@@ -513,6 +523,7 @@ public final class ZstdNet {
             out.write("runtime_seconds=" + runtimeSeconds() + "\n");
             out.write("benchmark_runs=" + benchmarkRunCount() + "\n");
             out.write("compression_level=" + compressionLevel() + "\n");
+            out.write("client_compression_level=" + clientCompressionLevel() + "\n");
             out.write("connections_active=" + stats.connections() + "\n");
             out.write("connections_total=" + stats.totalConnections() + "\n");
             out.write("bytes_raw_upload=" + stats.rawUpBytes() + "\n");

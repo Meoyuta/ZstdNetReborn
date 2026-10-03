@@ -139,6 +139,7 @@ public final class ZstdNettyPipeline {
 
         var currentHandler = pipeline.get(name);
         if (currentHandler instanceof ZstdNettyEncoder encoder && !encoder.isIdleForMove()) {
+            LOGGER.fine("encoder reposition deferred: async compression or pending writes are in flight");
             return;
         }
         var handler = copyForMove(currentHandler);
@@ -156,6 +157,7 @@ public final class ZstdNettyPipeline {
 
         var currentHandler = pipeline.get(name);
         if (currentHandler instanceof ZstdNettyEncoder encoder && !encoder.isIdleForMove()) {
+            LOGGER.fine("encoder reposition deferred: async compression or pending writes are in flight");
             return;
         }
         var handler = copyForMove(currentHandler);

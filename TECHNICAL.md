@@ -264,9 +264,9 @@ If a handler being removed does not belong to `net.minecraft.*`, a warning is lo
 
 ## 12. Compression Levels and Benchmarking
 
-The server's default outbound level is 9 and the client's default outbound level is 6. Each level applies independently to the persistent stream in that direction.
+The server's default outbound level is 9 and the client's default outbound level is 6. Each level applies independently to the persistent stream in that direction. The server stores a client outbound level target for management and diagnostics; a client applies its own local compression-level setting.
 
-Server commands can change the level used by new connections. The benchmark uses an independent codec and sampled snapshots to test candidate levels, recording compressed size and encode/decode time before selecting a level within the configured range. Online persistent streams are never reused by the benchmark; a new level applies to new connections or the next stream reset.
+The `/zstdnet complevel set <serverLevel> <clientLevel>` command changes the server outbound level and stores the client outbound level target. It cannot rewrite a remote client's configuration file. The benchmark uses an independent codec and sampled snapshots to test candidate levels, recording compressed size and encode/decode time before selecting a level within the configured range. Online persistent streams are never reused by the benchmark; a new level applies to new connections or the next stream reset.
 
 ## 13. Statistics, Status, and Diagnostics
 
@@ -321,7 +321,7 @@ No permission is required for:
 Permission level 2 is required for:
 
 - `start`, `stop`, `reload`: manage the server-side Zstd service.
-- `complevel set <1-22>`: set the server compression level.
+- `complevel set <serverLevel> <clientLevel>`: set the server outbound level and store the client outbound level target (1-22 each).
 - `benchmark start`, `benchmark interval <minutes>`: control benchmarking.
 - `dictionary train <seconds>`, `stop`, `cancel`: control dictionary training.
 - `dictionary import <path>`, `export`, `switch <dictionary-name>`, `unload`, `name <file> <dictionary-name>`: manage dictionaries.

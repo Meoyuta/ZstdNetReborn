@@ -123,9 +123,12 @@ public final class ZstdCommands {
         return Commands.literal("complevel")
                 .requires(source -> source.hasPermission(2))
             .then(Commands.literal("set")
-                .then(Commands.argument("level", IntegerArgumentType.integer(1, 22))
-                    .executes(context -> handler.setCompressionLevel(
-                        context.getSource(), IntegerArgumentType.getInteger(context, "level")))));
+                .then(Commands.argument("serverLevel", IntegerArgumentType.integer(1, 22))
+                    .then(Commands.argument("clientLevel", IntegerArgumentType.integer(1, 22))
+                        .executes(context -> handler.setCompressionLevels(
+                            context.getSource(),
+                            IntegerArgumentType.getInteger(context, "serverLevel"),
+                            IntegerArgumentType.getInteger(context, "clientLevel"))))));
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> createDictionaryCommand(
@@ -263,10 +266,10 @@ public final class ZstdCommands {
         }
     }
 
-    private int setCompressionLevel(CommandSourceStack source, int level) {
+    private int setCompressionLevels(CommandSourceStack source, int serverLevel, int clientLevel) {
         try {
-            mod.setTemporaryCompressionLevel(level);
-            success(source, "complevel.set", level);
+            mod.setTemporaryCompressionLevels(serverLevel, clientLevel);
+            success(source, "complevel.set", serverLevel, clientLevel);
             return 1;
         } catch (IllegalStateException e) {
             mod.commandFailed("set compression level", e);
